@@ -1,16 +1,16 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AIS/TIS PDF to Excel Converter</title>
+  <title>AIS/TIS PDF → Excel Converter (Final)</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
     h2 { color: #2c3e50; }
-    button { margin: 5px; padding: 10px; border-radius: 6px; cursor: pointer; }
-    #preview { margin-top: 20px; max-height: 400px; overflow: auto; border: 1px solid #ccc; padding: 10px; }
+    input, button { margin: 5px; padding: 8px; }
+    #status { margin: 10px 0; font-weight: bold; }
+    #preview { margin-top: 15px; max-height: 400px; overflow: auto; border: 1px solid #ccc; padding: 10px; }
     table { border-collapse: collapse; width: 100%; font-size: 12px; }
     th, td { border: 1px solid #ddd; padding: 4px; }
     th { background: #f4f4f4; }
@@ -20,7 +20,7 @@
   <h2>AIS / TIS PDF → Excel Converter</h2>
   <input type="file" id="pdfFile" accept="application/pdf"><br>
   <input type="text" id="password" placeholder="Enter password (pan+ddmmyyyy)" size="40"><br>
-  <button id="parseBtn">Parse & Preview</button>
+  <button id="parseBtn">Preview</button>
   <button id="downloadBtn" disabled>Download Excel</button>
   <div id="status"></div>
   <div id="preview"></div>
@@ -30,15 +30,20 @@ const parseBtn = document.getElementById("parseBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const statusDiv = document.getElementById("status");
 const previewDiv = document.getElementById("preview");
+let parsedData = { AIS: [], TIS: [] };
 
-let parsedData = {};
+function cleanAmount(str) {
+  if (!str) return "";
+  str = str.replace(/[₹,]/g,"").trim();
+  if (/^\(.*\)$/.test(str)) str = "-" + str.slice(1,-1);
+  return isNaN(str) ? str : Number(str);
+}
 
 parseBtn.addEventListener("click", async () => {
   const file = document.getElementById("pdfFile").files[0];
   if (!file) { alert("Upload a PDF file"); return; }
   const password = document.getElementById("password").value.trim();
   statusDiv.innerHTML = "Parsing... please wait";
-  parsedData = { AIS: [], TIS: [] };
 
   const reader = new FileReader();
   reader.onload = async function() {
@@ -49,7 +54,7 @@ parseBtn.addEventListener("click", async () => {
       for (let i=1; i<=pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const text = await page.getTextContent();
-        const strings = text.items.map(item => item.str);
+        const strings = text.items.map(it=>it.str);
         allText += strings.join(" ") + "\n";
       }
       processText(allText);
@@ -61,26 +66,40 @@ parseBtn.addEventListener("click", async () => {
 });
 
 function processText(text) {
+  parsedData = { AIS: [], TIS: [], Summary: [] };
   const lines = text.split(/\n+/).map(l => l.trim()).filter(l => l);
   let mode = null;
+  let lastInfo = { code:"", desc:"", src:"" };
+
   for (let line of lines) {
-    if (line.includes("INFORMATION CODE") || line.includes("INFORMATION DESCRIPTION")) {
-      mode = "AIS"; continue;
-    }
-    if (line.includes("INFORMATION CATEGORY") || line.includes("PROCESSED BY SYSTEM")) {
-      mode = "TIS"; continue;
-    }
+    if (line.includes("INFORMATION CODE")) { mode="AIS"; continue; }
+    if (line.includes("INFORMATION CATEGORY")) { mode="TIS"; continue; }
     if (!mode) continue;
-    if (mode === "AIS") parsedData.AIS.push(line.split(/\s{2,}/));
-    if (mode === "TIS") parsedData.TIS.push(line.split(/\s{2,}/));
+
+    const cols = line.split(/\s{2,}/).map(c=>c.trim());
+    if (mode==="AIS") {
+      if (/^\d{3,}$/.test(cols[0])) {
+        lastInfo.code = cols[0];
+        lastInfo.desc = cols[1]||lastInfo.desc;
+        lastInfo.src  = cols[2]||lastInfo.src;
+      } else if (/^\d+$/.test(cols[0])) {
+        parsedData.AIS.push([
+          cols[0],
+          lastInfo.code,
+          lastInfo.desc,
+          lastInfo.src,
+          cols[1]||"",
+          cleanAmount(cols[2]||""),
+          cleanAmount(cols[3]||"")
+        ]);
+      }
+    }
+    if (mode==="TIS" && /^\d+$/.test(cols[0])) {
+      parsedData.TIS.push(cols.map(c=>cleanAmount(c)));
+    }
   }
-  if (parsedData.AIS.length === 0 && parsedData.TIS.length === 0) {
-    // fallback generic mode
-    parsedData.Generic = lines.map((l,i)=>[i+1,l]);
-    statusDiv.innerHTML = "<span style='color:orange'>Fallback: Generic mode</span>";
-  } else {
-    statusDiv.innerHTML = "<span style='color:green'>Parsed successfully!</span>";
-  }
+
+  statusDiv.innerHTML = "Parsed successfully!";
   showPreview();
   downloadBtn.disabled = false;
 }
@@ -89,7 +108,7 @@ function showPreview() {
   previewDiv.innerHTML = "";
   for (let key in parsedData) {
     const data = parsedData[key];
-    if (data.length === 0) continue;
+    if (!data || data.length===0) continue;
     const table = document.createElement("table");
     const header = document.createElement("tr");
     header.innerHTML = "<th colspan='10'>" + key + " Preview ("+data.length+" rows)</th>";
@@ -109,12 +128,16 @@ function showPreview() {
 
 downloadBtn.addEventListener("click", () => {
   const wb = XLSX.utils.book_new();
-  for (let key in parsedData) {
-    if (parsedData[key].length === 0) continue;
-    const ws = XLSX.utils.aoa_to_sheet(parsedData[key]);
-    XLSX.utils.book_append_sheet(wb, ws, key.substring(0,30));
+  if (parsedData.AIS.length>0) {
+    const header = [["SR. NO.","INFORMATION CODE","INFORMATION DESCRIPTION","INFORMATION SOURCE","DATE","AMOUNT PAID/CREDITED","TDS DEDUCTED"]];
+    const ws = XLSX.utils.aoa_to_sheet(header.concat(parsedData.AIS));
+    XLSX.utils.book_append_sheet(wb, ws, "AIS Data");
   }
-  XLSX.writeFile(wb, "AIS-TIS.xlsx");
+  if (parsedData.TIS.length>0) {
+    const ws = XLSX.utils.aoa_to_sheet(parsedData.TIS);
+    XLSX.utils.book_append_sheet(wb, ws, "TIS Data");
+  }
+  XLSX.writeFile(wb, "AIS_TIS_Extract.xlsx");
 });
 </script>
 </body>
