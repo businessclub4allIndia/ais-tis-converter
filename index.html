@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AIS/TIS PDF → Excel Converter (Final)</title>
+  <title>AIS/TIS PDF → Excel Converter (Final Fixed)</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
@@ -108,35 +108,50 @@ function showPreview() {
   previewDiv.innerHTML = "";
   for (let key in parsedData) {
     const data = parsedData[key];
-    if (!data || data.length===0) continue;
     const table = document.createElement("table");
     const header = document.createElement("tr");
     header.innerHTML = "<th colspan='10'>" + key + " Preview ("+data.length+" rows)</th>";
     table.appendChild(header);
-    data.slice(0,200).forEach(row => {
+    if (data.length === 0) {
       const tr = document.createElement("tr");
-      row.forEach(cell => {
-        const td = document.createElement("td");
-        td.textContent = cell;
-        tr.appendChild(td);
-      });
+      tr.innerHTML = "<td>No data found</td>";
       table.appendChild(tr);
-    });
+    } else {
+      data.slice(0,200).forEach(row => {
+        const tr = document.createElement("tr");
+        row.forEach(cell => {
+          const td = document.createElement("td");
+          td.textContent = cell;
+          tr.appendChild(td);
+        });
+        table.appendChild(tr);
+      });
+    }
     previewDiv.appendChild(table);
   }
 }
 
 downloadBtn.addEventListener("click", () => {
   const wb = XLSX.utils.book_new();
-  if (parsedData.AIS.length>0) {
-    const header = [["SR. NO.","INFORMATION CODE","INFORMATION DESCRIPTION","INFORMATION SOURCE","DATE","AMOUNT PAID/CREDITED","TDS DEDUCTED"]];
-    const ws = XLSX.utils.aoa_to_sheet(header.concat(parsedData.AIS));
-    XLSX.utils.book_append_sheet(wb, ws, "AIS Data");
-  }
-  if (parsedData.TIS.length>0) {
-    const ws = XLSX.utils.aoa_to_sheet(parsedData.TIS);
-    XLSX.utils.book_append_sheet(wb, ws, "TIS Data");
-  }
+
+  // AIS Sheet
+  const aisHeader = [["SR. NO.","INFORMATION CODE","INFORMATION DESCRIPTION","INFORMATION SOURCE","DATE","AMOUNT PAID/CREDITED","TDS DEDUCTED"]];
+  const aisSheet = XLSX.utils.aoa_to_sheet(aisHeader.concat(parsedData.AIS));
+  XLSX.utils.book_append_sheet(wb, aisSheet, "AIS Data");
+
+  // TIS Sheet
+  const tisHeader = [["SR. NO.","PART","DESCRIPTION","SOURCE","AMOUNT DESCRIPTION","REPORTED","PROCESSED","ACCEPTED"]];
+  const tisSheet = XLSX.utils.aoa_to_sheet(tisHeader.concat(parsedData.TIS));
+  XLSX.utils.book_append_sheet(wb, tisSheet, "TIS Data");
+
+  // Summary Sheet
+  const summary = [["Type","Total Rows"]];
+  summary.push(["AIS", parsedData.AIS.length]);
+  summary.push(["TIS", parsedData.TIS.length]);
+  const summarySheet = XLSX.utils.aoa_to_sheet(summary);
+  XLSX.utils.book_append_sheet(wb, summarySheet, "Summary");
+
+  // Download Excel
   XLSX.writeFile(wb, "AIS_TIS_Extract.xlsx");
 });
 </script>
