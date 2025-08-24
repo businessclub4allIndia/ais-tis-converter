@@ -457,11 +457,11 @@
             const numPages = pdf.numPages;
             let extractedData = {
                 pages: [],
+                tables: [],
                 summary: {
                     totalPages: numPages,
                     extractedText: '',
-                    tables: [],
-                    summary: {}
+                    rawData: []
                 }
             };
             
@@ -469,194 +469,178 @@
                 const page = await pdf.getPage(pageNum);
                 const textContent = await page.getTextContent();
                 
-                let pageText = '';
-                const items = textContent.items;
+                // Extract text with positioning for table reconstruction
+                const textItems = textContent.items.map(item => ({
+                    text: item.str,
+                    x: item.transform[4],
+                    y: item.transform[5],
+                    width: item.width,
+                    height: item.height,
+                    fontName: item.fontName
+                }));
                 
-                for (let item of items) {
-                    pageText += item.str + ' ';
-                }
+                // Group text items by approximate Y position (rows)
+                const rows = groupTextIntoRows(textItems);
+                
+                // Convert rows into table format
+                const tableData = convertRowsToTable(rows);
                 
                 extractedData.pages.push({
                     pageNumber: pageNum,
-                    text: pageText.trim()
+                    textItems: textItems,
+                    tableData: tableData,
+                    rawText: textItems.map(item => item.text).join(' ')
                 });
                 
-                extractedData.summary.extractedText += pageText + '\n\n';
+                extractedData.summary.extractedText += textItems.map(item => item.text).join(' ') + '\n\n';
                 
                 updateProgress(50 + (pageNum / numPages) * 25, `Processing page ${pageNum} of ${numPages}...`);
             }
             
-            // Parse AIS/TIS specific data
-            extractedData.summary = parseAISData(extractedData.summary.extractedText);
+            // Parse summary data for the additional summary sheet
+            extractedData.summary = parseAISSummary(extractedData);
             
             return extractedData;
         }
         
-        function parseAISData(text) {
+        function groupTextIntoRows(textItems) {
+            // Sort by Y position (top to bottom)
+            textItems.sort((a, b) => b.y - a.y);
+            
+            const rows = [];
+            const tolerance = 5; // Y position tolerance for same row
+            
+            textItems.forEach(item => {
+                if (item.text.trim()) {
+                    let foundRow = false;
+                    
+                    for (let row of rows) {
+                        if (Math.abs(row.y - item.y) <= tolerance) {
+                            row.items.push(item);
+                            foundRow = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!foundRow) {
+                        rows.push({
+                            y: item.y,
+                            items: [item]
+                        });
+                    }
+                }
+            });
+            
+            // Sort items within each row by X position (left to right)
+            rows.forEach(row => {
+                row.items.sort((a, b) => a.x - b.x);
+            });
+            
+            return rows;
+        }
+        
+        function convertRowsToTable(rows) {
+            const tableData = [];
+            
+            rows.forEach(row => {
+                const rowData = [];
+                let currentText = '';
+                let lastX = -1;
+                const columnThreshold = 50; // Minimum gap between columns
+                
+                row.items.forEach(item => {
+                    if (lastX !== -1 && item.x - lastX > columnThreshold && currentText.trim()) {
+                        rowData.push(currentText.trim());
+                        currentText = item.text;
+                    } else {
+                        if (currentText) currentText += ' ';
+                        currentText += item.text;
+                    }
+                    lastX = item.x + item.width;
+                });
+                
+                if (currentText.trim()) {
+                    rowData.push(currentText.trim());
+                }
+                
+                if (rowData.length > 0) {
+                    tableData.push(rowData);
+                }
+            });
+            
+            return tableData;
+        }
+        
+        function parseAISSummary(extractedData) {
+            const allText = extractedData.summary.extractedText;
             const summary = {
                 taxpayerInfo: {},
-                taxSummary: {},
-                incomeDetails: [],
-                deductions: [],
-                taxes: [],
-                refunds: [],
-                rawAmounts: [],
-                tdsSummary: [],
-                salaryDetails: [],
-                interestDetails: [],
-                capitalGains: [],
-                otherIncomes: []
+                incomeSummary: {},
+                tdsSummary: {},
+                refundSummary: {},
+                deductionSummary: {},
+                totalPages: extractedData.totalPages,
+                totalTables: 0,
+                allAmounts: [],
+                keyFinancials: {}
             };
             
-            // Clean text for better parsing
-            const cleanText = text.replace(/\s+/g, ' ').trim();
+            // Extract basic taxpayer info
+            const panMatch = allText.match(/(?:PAN|Permanent Account Number)[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i);
+            if (panMatch) summary.taxpayerInfo.pan = panMatch[1];
             
-            // Extract taxpayer information with multiple patterns
-            const panPatterns = [
-                /PAN[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i,
-                /Permanent Account Number[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i,
-                /([A-Z]{5}[0-9]{4}[A-Z]{1})/g
-            ];
+            const nameMatch = allText.match(/(?:Name|Taxpayer Name)[:\s]*([A-Z][A-Z\s]{5,50}?)(?:\s(?:PAN|DOB|Address|Father))/i);
+            if (nameMatch) summary.taxpayerInfo.name = nameMatch[1].trim();
             
-            for (let pattern of panPatterns) {
-                const match = cleanText.match(pattern);
-                if (match && match[1]) {
-                    summary.taxpayerInfo.pan = match[1];
-                    break;
-                }
-            }
+            const fyMatch = allText.match(/(?:Financial Year|FY|Assessment Year|AY)[:\s]*(\d{4}-\d{2,4})/i);
+            if (fyMatch) summary.taxpayerInfo.financialYear = fyMatch[1];
             
-            // Extract name with multiple patterns
-            const namePatterns = [
-                /Name[:\s]*([A-Z][A-Z\s]{2,50}?)(?:\s|PAN|DOB|Address)/i,
-                /Taxpayer Name[:\s]*([A-Z][A-Z\s]{2,50}?)(?:\s|PAN|DOB|Address)/i,
-                /([A-Z][A-Z\s]{10,50}?)(?:PAN|DOB)/i
-            ];
+            const dobMatch = allText.match(/(?:DOB|Date of Birth)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
+            if (dobMatch) summary.taxpayerInfo.dob = dobMatch[1];
             
-            for (let pattern of namePatterns) {
-                const match = cleanText.match(pattern);
-                if (match && match[1] && match[1].length > 5) {
-                    summary.taxpayerInfo.name = match[1].trim();
-                    break;
-                }
-            }
-            
-            // Extract financial year
-            const fyPatterns = [
-                /(?:Financial Year|FY|Assessment Year|AY)[:\s]*(\d{4}-\d{2,4})/i,
-                /(\d{4}-\d{2,4})/g
-            ];
-            
-            for (let pattern of fyPatterns) {
-                const match = cleanText.match(pattern);
-                if (match && match[1]) {
-                    summary.taxpayerInfo.financialYear = match[1];
-                    break;
-                }
-            }
-            
-            // Enhanced amount extraction with context
+            // Extract all amounts with better patterns
             const amountPatterns = [
-                /Rs\.?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
-                /INR\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
-                /₹\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
-                /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)\s*(?:Rs|INR|₹)/gi,
+                /(?:Rs\.?|INR|₹)\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
+                /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)\s*(?:Rs\.?|INR|₹)/gi,
                 /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g
             ];
             
-            let allAmounts = new Set();
-            for (let pattern of amountPatterns) {
-                const matches = [...cleanText.matchAll(pattern)];
+            const foundAmounts = new Set();
+            amountPatterns.forEach(pattern => {
+                const matches = [...allText.matchAll(pattern)];
                 matches.forEach(match => {
-                    if (match[1] && parseFloat(match[1].replace(/,/g, '')) > 100) {
-                        allAmounts.add(match[1]);
+                    const amount = match[1];
+                    const numValue = parseFloat(amount.replace(/,/g, ''));
+                    if (numValue >= 100) { // Filter out small numbers that aren't amounts
+                        foundAmounts.add(amount);
                     }
-                });
-            }
-            
-            summary.rawAmounts = Array.from(allAmounts);
-            
-            // Parse salary information
-            const salarySection = cleanText.match(/(?:salary|employment|employer).*?(?=(?:interest|dividend|capital|business|profession|other|refund)|$)/gis);
-            if (salarySection) {
-                salarySection.forEach(section => {
-                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
-                    const employer = section.match(/employer[:\s]*([A-Z][A-Z\s&.,]{5,50}?)(?:\s|TAN|PAN|Address)/i);
-                    
-                    summary.salaryDetails.push({
-                        employer: employer ? employer[1].trim() : 'Not specified',
-                        section: section.substring(0, 300),
-                        amounts: amounts.map(m => m[1])
-                    });
-                });
-            }
-            
-            // Parse TDS information
-            const tdsPatterns = [
-                /TDS[:\s]*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
-                /Tax Deducted at Source[:\s]*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
-                /Deducted[:\s]*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi
-            ];
-            
-            tdsPatterns.forEach(pattern => {
-                const matches = [...cleanText.matchAll(pattern)];
-                matches.forEach(match => {
-                    summary.taxes.push({
-                        type: 'TDS',
-                        amount: match[1],
-                        context: cleanText.substring(Math.max(0, match.index - 50), match.index + 100)
-                    });
                 });
             });
             
-            // Parse interest income
-            const interestSection = cleanText.match(/(?:interest|bank|deposit|saving).*?(?=(?:salary|dividend|capital|business|profession|other|refund)|$)/gis);
-            if (interestSection) {
-                interestSection.forEach(section => {
-                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
-                    const bank = section.match(/(?:bank|institution)[:\s]*([A-Z][A-Z\s&.,]{5,50}?)(?:\s|Branch|Account)/i);
-                    
-                    summary.interestDetails.push({
-                        institution: bank ? bank[1].trim() : 'Not specified',
-                        section: section.substring(0, 300),
-                        amounts: amounts.map(m => m[1])
-                    });
-                });
+            summary.allAmounts = Array.from(foundAmounts).sort((a, b) => {
+                return parseFloat(b.replace(/,/g, '')) - parseFloat(a.replace(/,/g, ''));
+            });
+            
+            // Calculate key financials
+            if (summary.allAmounts.length > 0) {
+                const amounts = summary.allAmounts.map(a => parseFloat(a.replace(/,/g, '')));
+                summary.keyFinancials.totalAmounts = amounts.length;
+                summary.keyFinancials.highestAmount = Math.max(...amounts).toLocaleString('en-IN');
+                summary.keyFinancials.lowestAmount = Math.min(...amounts).toLocaleString('en-IN');
+                summary.keyFinancials.averageAmount = (amounts.reduce((a, b) => a + b, 0) / amounts.length).toLocaleString('en-IN');
+                summary.keyFinancials.totalSum = amounts.reduce((a, b) => a + b, 0).toLocaleString('en-IN');
             }
             
-            // Parse dividend information
-            const dividendSection = cleanText.match(/(?:dividend).*?(?=(?:salary|interest|capital|business|profession|other|refund)|$)/gis);
-            if (dividendSection) {
-                dividendSection.forEach(section => {
-                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
-                    summary.incomeDetails.push({
-                        type: 'Dividend',
-                        details: section.substring(0, 300),
-                        amounts: amounts.map(m => m[1])
-                    });
-                });
-            }
+            // Count tables found
+            summary.totalTables = extractedData.pages.reduce((count, page) => count + page.tableData.length, 0);
             
-            // Parse capital gains
-            const capitalSection = cleanText.match(/(?:capital gain|mutual fund|share|equity).*?(?=(?:salary|interest|dividend|business|profession|other|refund)|$)/gis);
-            if (capitalSection) {
-                capitalSection.forEach(section => {
-                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
-                    summary.capitalGains.push({
-                        type: 'Capital Gains',
-                        details: section.substring(0, 300),
-                        amounts: amounts.map(m => m[1])
-                    });
-                });
-            }
-            
-            // Calculate summary totals
-            const allAmountNumbers = summary.rawAmounts.map(amt => parseFloat(amt.replace(/,/g, '')) || 0);
-            allAmountNumbers.sort((a, b) => b - a);
-            
-            if (allAmountNumbers.length > 0) {
-                summary.taxSummary.highestAmount = allAmountNumbers[0].toLocaleString('en-IN');
-                summary.taxSummary.totalAmountsFound = allAmountNumbers.length;
+            return summary;
+        }
+        
+        function parseAISData(text) {
+            // This function is now replaced by parseAISSummary but keeping for compatibility
+            return parseAISSummary({ summary: { extractedText: text }, pages: [], totalPages: 0 });
+        }AmountNumbers.length;
                 summary.taxSummary.sumOfAllAmounts = allAmountNumbers.reduce((a, b) => a + b, 0).toLocaleString('en-IN');
             }
             
@@ -666,88 +650,117 @@
         async function createExcelFile(data) {
             const workbook = XLSX.utils.book_new();
             
-            // Create summary sheet with enhanced data
+            // Create Summary Sheet (NEW)
             const summaryData = [
-                ['AIS/TIS Summary Report'],
+                ['AIS/TIS SUMMARY REPORT'],
                 ['Generated on:', new Date().toLocaleString()],
                 [''],
                 ['TAXPAYER INFORMATION'],
-                ['PAN', data.summary.taxpayerInfo.pan || 'Not found'],
-                ['Name', data.summary.taxpayerInfo.name || 'Not found'],
-                ['Financial Year', data.summary.taxpayerInfo.financialYear || 'Not found'],
+                ['PAN', data.summary.taxpayerInfo.pan || 'Not Available'],
+                ['Name', data.summary.taxpayerInfo.name || 'Not Available'],
+                ['Financial Year', data.summary.taxpayerInfo.financialYear || 'Not Available'],
+                ['Date of Birth', data.summary.taxpayerInfo.dob || 'Not Available'],
+                [''],
+                ['DOCUMENT SUMMARY'],
+                ['Total Pages', data.summary.totalPages],
+                ['Total Tables Found', data.summary.totalTables],
+                ['Processing Date', new Date().toLocaleDateString()],
                 [''],
                 ['FINANCIAL SUMMARY'],
-                ['Total Amounts Found', data.summary.taxSummary.totalAmountsFound || 0],
-                ['Highest Amount', 'Rs. ' + (data.summary.taxSummary.highestAmount || '0')],
-                ['Sum of All Amounts', 'Rs. ' + (data.summary.taxSummary.sumOfAllAmounts || '0')],
+                ['Total Amounts Found', data.summary.keyFinancials.totalAmounts || 0],
+                ['Highest Amount (Rs.)', data.summary.keyFinancials.highestAmount || '0'],
+                ['Lowest Amount (Rs.)', data.summary.keyFinancials.lowestAmount || '0'],
+                ['Average Amount (Rs.)', data.summary.keyFinancials.averageAmount || '0'],
+                ['Total Sum (Rs.)', data.summary.keyFinancials.totalSum || '0'],
                 [''],
-                ['ALL AMOUNTS EXTRACTED'],
-                ['S.No.', 'Amount (Rs.)']
+                ['ALL AMOUNTS FOUND'],
+                ['Sr.No.', 'Amount (Rs.)', 'Numeric Value']
             ];
             
-            // Add all extracted amounts
-            if (data.summary.rawAmounts && data.summary.rawAmounts.length > 0) {
-                data.summary.rawAmounts.forEach((amount, index) => {
-                    summaryData.push([index + 1, amount]);
+            // Add all amounts to summary
+            if (data.summary.allAmounts && data.summary.allAmounts.length > 0) {
+                data.summary.allAmounts.forEach((amount, index) => {
+                    summaryData.push([
+                        index + 1, 
+                        amount, 
+                        parseFloat(amount.replace(/,/g, ''))
+                    ]);
                 });
+            } else {
+                summaryData.push(['No amounts found', '', '']);
             }
             
-            summaryData.push(['']);
-            summaryData.push(['DOCUMENT PROCESSING INFO']);
-            summaryData.push(['Total Pages Processed', data.pages.length]);
-            summaryData.push(['Salary Records Found', data.summary.salaryDetails?.length || 0]);
-            summaryData.push(['Interest Records Found', data.summary.interestDetails?.length || 0]);
-            summaryData.push(['TDS Records Found', data.summary.taxes?.length || 0]);
-            summaryData.push(['Capital Gains Found', data.summary.capitalGains?.length || 0]);
-            
             const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
+            
+            // Style the summary sheet
+            summarySheet['!cols'] = [
+                { width: 25 },
+                { width: 20 },
+                { width: 15 }
+            ];
+            
             XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
             
-            // Create individual page sheets
-            data.pages.forEach((page, index) => {
-                const pageData = [
-                    [`Page ${page.pageNumber} Content`],
-                    [''],
-                    [page.text]
-                ];
+            // Create sheets for each page maintaining original table structure
+            data.pages.forEach((page, pageIndex) => {
+                let sheetData = [];
                 
-                const pageSheet = XLSX.utils.aoa_to_sheet(pageData);
+                // Add page header
+                sheetData.push([`PAGE ${page.pageNumber} - ORIGINAL DATA`]);
+                sheetData.push(['']);
+                
+                if (page.tableData && page.tableData.length > 0) {
+                    // Add the table data as-is (preserving original structure)
+                    page.tableData.forEach(row => {
+                        // Ensure all rows have same number of columns
+                        const maxCols = Math.max(...page.tableData.map(r => r.length));
+                        while (row.length < maxCols) {
+                            row.push('');
+                        }
+                        sheetData.push(row);
+                    });
+                } else {
+                    // If no structured table found, add raw text
+                    sheetData.push(['Raw Text Content:']);
+                    sheetData.push([page.rawText]);
+                }
+                
+                const pageSheet = XLSX.utils.aoa_to_sheet(sheetData);
+                
+                // Auto-size columns
+                if (page.tableData && page.tableData.length > 0) {
+                    const maxCols = Math.max(...page.tableData.map(r => r.length));
+                    pageSheet['!cols'] = Array(maxCols).fill().map(() => ({ width: 15 }));
+                }
+                
                 XLSX.utils.book_append_sheet(workbook, pageSheet, `Page_${page.pageNumber}`);
             });
             
-            // Create detailed data sheets
-            if (data.summary.incomeDetails.length > 0) {
-                const incomeData = [
-                    ['Income Details'],
-                    ['Type', 'Details']
-                ];
-                
-                data.summary.incomeDetails.forEach(income => {
-                    incomeData.push([income.type, income.details]);
-                });
-                
-                const incomeSheet = XLSX.utils.aoa_to_sheet(incomeData);
-                XLSX.utils.book_append_sheet(workbook, incomeSheet, 'Income_Details');
-            }
+            // Create a combined data sheet with all tables
+            let combinedData = [
+                ['COMBINED AIS/TIS DATA'],
+                ['All tables from all pages combined'],
+                ['']
+            ];
             
-            if (data.summary.taxes.length > 0) {
-                const taxData = [
-                    ['Tax Details'],
-                    ['Type', 'Details']
-                ];
-                
-                data.summary.taxes.forEach(tax => {
-                    taxData.push([tax.type, tax.details]);
-                });
-                
-                const taxSheet = XLSX.utils.aoa_to_sheet(taxData);
-                XLSX.utils.book_append_sheet(workbook, taxSheet, 'Tax_Details');
-            }
+            data.pages.forEach(page => {
+                combinedData.push([`--- PAGE ${page.pageNumber} ---`]);
+                if (page.tableData && page.tableData.length > 0) {
+                    page.tableData.forEach(row => {
+                        combinedData.push(row);
+                    });
+                }
+                combinedData.push(['']); // Empty row between pages
+            });
             
-            // Generate filename
+            const combinedSheet = XLSX.utils.aoa_to_sheet(combinedData);
+            combinedSheet['!cols'] = Array(20).fill().map(() => ({ width: 12 }));
+            XLSX.utils.book_append_sheet(workbook, combinedSheet, 'All_Data_Combined');
+            
+            // Generate filename with current date
             const fileName = `AIS_TIS_${data.summary.taxpayerInfo.pan || 'Export'}_${new Date().toISOString().split('T')[0]}.xlsx`;
             
-            // Save file
+            // Save the file
             XLSX.writeFile(workbook, fileName);
         }
         
