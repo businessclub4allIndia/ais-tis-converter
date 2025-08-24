@@ -1,115 +1,383 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AIS/TIS PDF to Excel Converter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIS + TIS PDF → Excel (Single File)</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; padding: 30px; }
-    button { padding: 10px 20px; background: #1976d2; color: white; border: none; border-radius: 6px; cursor: pointer; }
-    button:hover { background: #0d47a1; }
-    input { margin: 10px 0; padding: 8px; width: 300px; }
+    :root { --bg:#f6f7fb; --card:#fff; --fg:#111; --muted:#555; --primary:#1f6feb; }
+    body { margin:0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--fg); }
+    .wrap { max-width: 980px; margin: 32px auto; padding: 0 16px; }
+    .card { background:var(--card); border-radius:20px; box-shadow: 0 10px 30px rgba(0,0,0,.08); padding:24px; }
+    h1 { margin:0 0 10px; font-size: 28px; }
+    p.lead { margin:0 0 16px; color:var(--muted); }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    label { font-weight: 600; font-size: 14px; }
+    input[type="text"], input[type="file"] {
+      width:100%; padding:10px 12px; border-radius:12px; border:1px solid #ddd; outline:none;
+    }
+    .row { display:flex; gap:12px; align-items:center; margin-top: 16px; flex-wrap: wrap; }
+    button { background:var(--primary); color:#fff; border:none; padding:10px 16px; border-radius:12px; cursor:pointer; }
+    button.secondary { background:#e5e7eb; color:#111; }
+    .msg { font-size:14px; }
+    .msg.error { color:crimson; }
+    .msg.ok { color:green; }
+    details { margin-top: 14px; }
+    table { border-collapse: collapse; font-size: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #f2f2f2; }
+    footer { margin-top:16px; color:#777; font-size:12px; }
+    .hint { color:#666; font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
   </style>
 </head>
 <body>
-  <h2>AIS / TIS PDF → Excel Converter</h2>
-  <input type="file" id="pdfFile" accept="application/pdf"><br>
-  <input type="text" id="password" placeholder="Enter password (pan+ddmmyyyy)"><br>
-  <button onclick="convertToExcel()">Convert to Excel</button>
-  <p id="status"></p>
+  <div class="wrap">
+    <div class="card">
+      <h1>AIS + TIS PDF → Excel Converter</h1>
+      <p class="lead">Upload your password-protected PDF (password = <b>lowercase PAN + DDMMYYYY</b>). The tool auto-detects AIS or TIS, flattens details, and exports Excel with a Summary sheet.</p>
 
-  <script>
-    async function convertToExcel() {
-      const fileInput = document.getElementById("pdfFile");
-      const password = document.getElementById("password").value.trim();
-      const status = document.getElementById("status");
+      <div class="grid">
+        <div>
+          <label>PDF file</label><br>
+          <input id="pdfFile" type="file" accept="application/pdf">
+          <div class="hint">Works for text-based PDFs (not scanned images).</div>
+        </div>
+        <div>
+          <label>Password</label><br>
+          <input id="password" type="text" placeholder="e.g. abcde1234f01011990" class="mono">
+        </div>
+      </div>
 
-      if (!fileInput.files.length) {
-        status.innerText = "Please select a PDF file.";
-        return;
+      <div class="row">
+        <button id="btnConvert">Convert to Excel</button>
+        <span id="status" class="msg"></span>
+      </div>
+
+      <details>
+        <summary>Excel output</summary>
+        <div style="padding-top:8px;overflow:auto">
+          <p><b>AIS sheet (flattened):</b> SR. NO. | INFORMATION CODE | INFORMATION DESCRIPTION | INFORMATION SOURCE | DATE OF PAYMENT/CREDIT | AMOUNT PAID/CREDITED | TDS DEDUCTED</p>
+          <p><b>TIS sheet:</b> SR. NO. | PART | INFORMATION DESCRIPTION | INFORMATION SOURCE | AMOUNT DESCRIPTION | REPORTED BY SOURCE | PROCESSED BY SYSTEM | ACCEPTED BY TAXPAYER/CONFIRMED BY SOURCE</p>
+        </div>
+      </details>
+
+      <footer>All processing happens in your browser. No data is uploaded to any server.</footer>
+    </div>
+  </div>
+
+<script>
+// ---------- Helpers ----------
+const AIS_COLUMNS = [
+  "SR. NO.",
+  "INFORMATION CODE",
+  "INFORMATION DESCRIPTION",
+  "INFORMATION SOURCE",
+  "DATE OF PAYMENT/CREDIT",
+  "AMOUNT PAID/CREDITED",
+  "TDS DEDUCTED"
+];
+
+const TIS_COLUMNS = [
+  "SR. NO.",
+  "PART",
+  "INFORMATION DESCRIPTION",
+  "INFORMATION SOURCE",
+  "AMOUNT DESCRIPTION",
+  "REPORTED BY SOURCE",
+  "PROCESSED BY SYSTEM",
+  "ACCEPTED BY TAXPAYER/CONFIRMED BY SOURCE"
+];
+
+function isAmountLike(s){
+  if (!s) return false;
+  s = String(s).trim();
+  // exclude dates
+  if (/\b\d{2}[-/][A-Za-z]{3}[-/]\d{4}\b|\b\d{2}[-/]\d{2}[-/]\d{4}\b/.test(s)) return false;
+  return /^(\(?\s*₹?\s*\d[\d,]*([.]\d+)?\s*\)?)$/.test(s);
+}
+
+function cleanAmount(s){
+  if (!s) return "";
+  s = String(s).replace(/\s+/g,"").replace(/₹/g,"").replace(/,/g,"");
+  const neg = s.startsWith("(") && s.endsWith(")");
+  if (neg) s = s.slice(1,-1);
+  return (neg? "-" : "") + s;
+}
+
+function toNumberOrText(s){
+  const v = parseFloat(s);
+  return isFinite(v) ? v : (s||"");
+}
+
+function groupByY(items){
+  const byY = new Map();
+  for (const it of items){
+    const [a,b,c,d,e,f] = it.transform;
+    it.x = e; it.y = f; it.w = it.width || 0;
+    const key = Math.round(f);
+    if (!byY.has(key)) byY.set(key, []);
+    byY.get(key).push(it);
+  }
+  return Array.from(byY.entries()).sort((p,q)=> q[0]-p[0]).map(e=>e[1]);
+}
+
+function splitByGaps(lineItems, gap=24){
+  const parts = [];
+  let bucket = [];
+  for (let i=0;i<lineItems.length;i++){
+    const t = lineItems[i];
+    bucket.push(t.str.trim());
+    const next = lineItems[i+1];
+    if (!next) break;
+    const g = next.x - (t.x + t.w);
+    if (g > gap){
+      parts.push(bucket.join(" ").trim());
+      bucket = [];
+    }
+  }
+  if (bucket.length) parts.push(bucket.join(" ").trim());
+  return parts.filter(Boolean);
+}
+
+function joinText(items){ return items.map(t=>t.str).join(" ").trim(); }
+
+// ---------- Detect document type ----------
+function detectType(allText){
+  const t = allText.toLowerCase();
+  // Strong TIS markers
+  if (t.includes("taxpayer information summary") ||
+      (t.includes("information category") && t.includes("reported by source") && t.includes("processed by system"))){
+    return "TIS";
+  }
+  // AIS markers
+  if (t.includes("annual information statement") ||
+      (t.includes("information code") && t.includes("information description") && t.includes("information source"))){
+    return "AIS";
+  }
+  // default: try AIS first
+  return "AIS";
+}
+
+// ---------- Parse AIS (flatten details) ----------
+function parseAIS(pages){
+  const rows = [];
+  let sr=1;
+  let context = { code:"", desc:"", source:"" };
+
+  for (const items of pages){
+    // Group lines
+    const lines = groupByY(items).map(line=> line.sort((a,b)=> a.x-b.x));
+    for (const line of lines){
+      const text = joinText(line).toLowerCase();
+
+      // Capture header context (Information Code/Description/Source lines)
+      if (text.includes("information code")){
+        // next lines will contain code/desc/source in separate cells; split by gaps
+        const parts = splitByGaps(line);
+        // Expect structure like: [INFORMATION CODE, <code>] [INFORMATION DESCRIPTION, <desc>] [INFORMATION SOURCE, <source> ...]
+        // So store labels to extract next meaningful tokens on subsequent lines.
+        continue;
       }
 
-      status.innerText = "Processing... Please wait.";
+      // Read specific value lines where values appear under each header cell.
+      // Heuristic: when a line contains TDS- or SFT- like code, treat as code/desc/source line
+      const parts = splitByGaps(line);
+      if (parts.length >= 3 && (/^(t[dcs]|sft)/i.test(parts[0]) || parts[0].match(/^\w{3}-\d+/i))) {
+        context.code = parts[0];
+        context.desc = parts[1] || context.desc;
+        context.source = parts[2] || context.source;
+        continue;
+      }
 
-      const file = fileInput.files[0];
-      const reader = new FileReader();
+      // Detail header row (Quarter / Date / Amount / TDS)
+      const isDetailHeader = /quarter/i.test(text) && /date of payment\/credit/i.test(text);
+      if (isDetailHeader) { continue; }
 
-      reader.onload = async function(e) {
-        const typedarray = new Uint8Array(e.target.result);
+      // Detail data row: should have a date and at least one amount-like token
+      const hasDate = /\b\d{2}[-/]\d{2}[-/]\d{4}\b|\b\d{2}\s+[A-Za-z]{3}\s+\d{4}\b/.test(joinText(line));
+      const amountCandidates = line.filter(t=> isAmountLike(t.str)).sort((a,b)=> a.x-b.x);
 
-        try {
-          const pdf = await pdfjsLib.getDocument({ data: typedarray, password: password }).promise;
-          let extractedRows = [];
-          let srNo = 1;
-
-          for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i);
-            const textContent = await page.getTextContent();
-
-            // Group words into lines by Y coordinate
-            let lines = {};
-            textContent.items.forEach(item => {
-              let y = Math.round(item.transform[5]); // vertical position
-              if (!lines[y]) lines[y] = [];
-              lines[y].push(item);
-            });
-
-            // Process each line into columns
-            Object.values(lines).forEach(lineItems => {
-              lineItems.sort((a, b) => a.transform[4] - b.transform[4]); // sort by X
-              const lineText = lineItems.map(it => it.str.trim()).filter(Boolean);
-
-              // Expect at least 6 columns for valid data
-              if (lineText.length >= 6) {
-                extractedRows.push([
-                  srNo++,
-                  lineText[0] || "",
-                  lineText[1] || "",
-                  lineText[2] || "",
-                  lineText[3] || "",
-                  lineText[4] || "",
-                  lineText[5] || ""
-                ]);
-              }
-            });
-          }
-
-          // Create workbook
-          const wb = XLSX.utils.book_new();
-          const ws = XLSX.utils.aoa_to_sheet([
-            ["SR. NO.","INFORMATION CODE","INFORMATION DESCRIPTION","INFORMATION SOURCE","DATE OF PAYMENT/CREDIT","AMOUNT PAID/CREDITED","TDS DEDUCTED"],
-            ...extractedRows
-          ]);
-          XLSX.utils.book_append_sheet(wb, ws, "Extracted Data");
-
-          // Summary Sheet (sum by INFO CODE)
-          let summary = {};
-          extractedRows.forEach(r => {
-            let code = r[1];
-            let amt = parseFloat(r[5].replace(/,/g,"")) || 0;
-            let tds = parseFloat(r[6].replace(/,/g,"")) || 0;
-            if (!summary[code]) summary[code] = { amt: 0, tds: 0 };
-            summary[code].amt += amt;
-            summary[code].tds += tds;
-          });
-
-          const summaryRows = [["INFORMATION CODE","TOTAL AMOUNT","TOTAL TDS"]];
-          Object.entries(summary).forEach(([code, vals]) => {
-            summaryRows.push([code, vals.amt, vals.tds]);
-          });
-          const ws2 = XLSX.utils.aoa_to_sheet(summaryRows);
-          XLSX.utils.book_append_sheet(wb, ws2, "Summary");
-
-          XLSX.writeFile(wb, "AIS_TIS_Extract.xlsx");
-          status.innerText = "Excel generated successfully!";
-        } catch (err) {
-          status.innerText = "Error: " + err.message;
+      if (hasDate && amountCandidates.length){
+        const tdsTok = amountCandidates[amountCandidates.length-1];
+        const amtTok = amountCandidates.length>=2 ? amountCandidates[amountCandidates.length-2] : null;
+        // extract date from parts (prefer token matching dd/mm/yyyy or dd Mon yyyy)
+        let dateStr = "";
+        for (const p of parts){
+          const m = p.match(/\b\d{2}[-/]\d{2}[-/]\d{4}\b|\b\d{2}\s+[A-Za-z]{3}\s+\d{4}\b/);
+          if (m){ dateStr = m[0]; break; }
         }
-      };
-      reader.readAsArrayBuffer(file);
+        const row = new Array(AIS_COLUMNS.length).fill("");
+        row[0] = String(sr++);
+        row[1] = context.code;
+        row[2] = context.desc;
+        row[3] = context.source;
+        row[4] = dateStr;
+        row[5] = toNumberOrText(cleanAmount(amtTok ? amtTok.str : ""));
+        row[6] = toNumberOrText(cleanAmount(tdsTok ? tdsTok.str : ""));
+        rows.push(row);
+      }
     }
-  </script>
+  }
+  return rows;
+}
+
+// ---------- Parse TIS ----------
+function parseTIS(pages){
+  const rows = [];
+  let sr = 1;
+  for (const items of pages){
+    const lines = groupByY(items).map(line=> line.sort((a,b)=> a.x-b.x));
+    for (const line of lines){
+      const txt = joinText(line);
+      const low = txt.toLowerCase();
+      // skip big headers
+      if (low.includes("information category") || low.includes("processed by system") && !/\d/.test(low)) continue;
+      // detail header row
+      if (low.includes("part") && low.includes("information description") && low.includes("reported by source")) continue;
+
+      const parts = splitByGaps(line, 22);
+      if (parts.length < 5) continue;
+
+      // Identify last three numeric-like columns -> reported, processed, accepted
+      const numIdx = [];
+      for (let i=0;i<parts.length;i++){
+        if (isAmountLike(parts[i])) numIdx.push(i);
+      }
+      if (numIdx.length >= 1){
+        const accepted = parts[numIdx[numIdx.length-1]];
+        const processed = numIdx.length>=2 ? parts[numIdx[numIdx.length-2]] : "";
+        const reported  = numIdx.length>=3 ? parts[numIdx[numIdx.length-3]] : "";
+        // everything before the first numeric is descriptive columns
+        const descParts = parts.slice(0, numIdx[0]);
+        // heuristic mapping: [SR, PART, DESC, SOURCE, AMOUNT DESC]
+        // SR may appear as standalone number at beginning
+        let srno = "", part="", desc="", source="", amountDesc="";
+        if (descParts.length >= 1){
+          const first = descParts[0];
+          if (/^\d+$/.test(first)) { srno = first; descParts.shift(); }
+        }
+        if (descParts.length >= 1){ part = descParts[0]; }
+        if (descParts.length >= 3){
+          desc = descParts[1];
+          source = descParts[2];
+          if (descParts.length >= 4) amountDesc = descParts[3];
+        } else if (descParts.length === 2){
+          desc = descParts[1];
+        }
+
+        const row = new Array(TIS_COLUMNS.length).fill("");
+        row[0] = srno || String(sr++);
+        row[1] = part;
+        row[2] = desc;
+        row[3] = source;
+        row[4] = amountDesc;
+        row[5] = toNumberOrText(cleanAmount(reported));
+        row[6] = toNumberOrText(cleanAmount(processed));
+        row[7] = toNumberOrText(cleanAmount(accepted));
+        rows.push(row);
+      }
+    }
+  }
+  return rows;
+}
+
+// ---------- Orchestrator ----------
+document.getElementById("btnConvert").addEventListener("click", async ()=>{
+  const file = document.getElementById("pdfFile").files?.[0];
+  const password = (document.getElementById("password").value||"").trim();
+  const status = document.getElementById("status");
+  status.textContent = ""; status.className = "msg";
+
+  if (!file){ status.textContent = "Please choose a PDF."; status.classList.add("error"); return; }
+  if (!password){ status.textContent = "Enter the PDF password (lowercase PAN + DDMMYYYY)."; status.classList.add("error"); return; }
+
+  try{
+    status.textContent = "Reading PDF...";
+    const buf = await file.arrayBuffer();
+    const task = pdfjsLib.getDocument({ data: buf, password });
+    const pdf = await task.promise;
+
+    const pages = [];
+    let allText = "";
+    for (let p=1;p<=pdf.numPages;p++){
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      pages.push(content.items);
+      allText += content.items.map(it=> it.str).join(" ") + "\n";
+    }
+
+    const type = detectType(allText);
+    let aisRows = [], tisRows = [];
+
+    if (type === "AIS"){
+      aisRows = parseAIS(pages);
+      // Some AIS files also include TIS-style summary; attempt parse too
+      tisRows = parseTIS(pages);
+    } else {
+      tisRows = parseTIS(pages);
+      // Sometimes TIS PDFs carry AIS-like sections
+      aisRows = parseAIS(pages);
+    }
+
+    if (!aisRows.length && !tisRows.length){
+      status.textContent = "Could not find AIS or TIS tables. Try another file."; status.classList.add("error"); return;
+    }
+
+    const wb = XLSX.utils.book_new();
+    if (aisRows.length){
+      const wsAIS = XLSX.utils.aoa_to_sheet([AIS_COLUMNS, ...aisRows]);
+      XLSX.utils.book_append_sheet(wb, wsAIS, "AIS Data");
+    }
+    if (tisRows.length){
+      const wsTIS = XLSX.utils.aoa_to_sheet([TIS_COLUMNS, ...tisRows]);
+      XLSX.utils.book_append_sheet(wb, wsTIS, "TIS Data");
+    }
+
+    // Summary sheet
+    const sumSheet = [];
+    if (aisRows.length){
+      const idxA = Object.fromEntries(AIS_COLUMNS.map((c,i)=>[c,i]));
+      const mapCode = new Map(), mapSource = new Map();
+      for (const r of aisRows){
+        const code = r[idxA["INFORMATION CODE"]] || "";
+        const src  = r[idxA["INFORMATION SOURCE"]] || "";
+        const amt  = parseFloat(r[idxA["AMOUNT PAID/CREDITED"]]) || 0;
+        const tds  = parseFloat(r[idxA["TDS DEDUCTED"]]) || 0;
+        const a = mapCode.get(code) || {amt:0,tds:0}; a.amt+=amt; a.tds+=tds; mapCode.set(code,a);
+        const b = mapSource.get(src) || {amt:0,tds:0}; b.amt+=amt; b.tds+=tds; mapSource.set(src,b);
+      }
+      sumSheet.push(["AIS Totals by Information Code","",""],["Code","Amount","TDS"]);
+      for (const [k,v] of mapCode.entries()) sumSheet.push([k,v.amt,v.tds]);
+      sumSheet.push(["","",""],["AIS Totals by Source","",""],["Source","Amount","TDS"]);
+      for (const [k,v] of mapSource.entries()) sumSheet.push([k,v.amt,v.tds]);
+    }
+    if (tisRows.length){
+      sumSheet.push(["","",""],["TIS Aggregate","",""]);
+      const idxT = Object.fromEntries(TIS_COLUMNS.map((c,i)=>[c,i]));
+      const totals = tisRows.reduce((acc,r)=>{
+        acc.reported += parseFloat(r[idxT["REPORTED BY SOURCE"]]) || 0;
+        acc.processed += parseFloat(r[idxT["PROCESSED BY SYSTEM"]]) || 0;
+        acc.accepted += parseFloat(r[idxT["ACCEPTED BY TAXPAYER/CONFIRMED BY SOURCE"]]) || 0;
+        return acc;
+      }, {reported:0, processed:0, accepted:0});
+      sumSheet.push(["Metric","Value"],["TIS Total Reported", totals.reported],["TIS Total Processed", totals.processed],["TIS Total Accepted", totals.accepted]);
+    }
+    if (sumSheet.length){
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sumSheet), "Summary");
+    }
+
+    XLSX.writeFile(wb, "AIS_TIS_Extract.xlsx");
+    status.textContent = "Excel downloaded."; status.classList.add("ok");
+  }catch(err){
+    console.error(err);
+    const msg = err && err.message ? err.message : String(err);
+    document.getElementById("status").textContent = "Error: " + msg;
+    document.getElementById("status").classList.add("error");
+  }
+});
+</script>
 </body>
 </html>
