@@ -1,4 +1,58 @@
-<!DOCTYPE html>
+function createSummary(allText) {
+            const summary = {
+                taxpayerInfo: {},
+                amounts: [],
+                keyStats: {}
+            };
+            
+            // Extract PAN
+            const panMatch = allText.match(/(?:PAN|Permanent Account Number)[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i);
+            if (panMatch) summary.taxpayerInfo.pan = panMatch[1];
+            
+            // Extract Name
+            const nameMatch = allText.match(/(?:Name)[:\s]*([A-Z][A-Z\s]{5,50}?)(?:\s(?:PAN|DOB|Address|Father))/i);
+            if (nameMatch) summary.taxpayerInfo.name = nameMatch[1].trim();
+            
+            // Extract Financial Year
+            const fyMatch = allText.match(/(?:Financial Year|FY|Assessment Year|AY)[:\s]*(\d{4}-\d{2,4})/i);
+            if (fyMatch) summary.taxpayerInfo.financialYear = fyMatch[1];
+            
+            // Extract DOB
+            const dobMatch = allText.match(/(?:DOB|Date of Birth)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
+            if (dobMatch) summary.taxpayerInfo.dob = dobMatch[1];
+            
+            // Extract all amounts
+            const amountPattern = /(?:Rs\.?|INR|₹)?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi;
+            const amounts = [...allText.matchAll(amountPattern)];
+            
+            amounts.forEach(match => {
+                const amount = match[1];
+                const numValue = parseFloat(amount.replace(/,/g, ''));
+                if (numValue >= 100) { // Filter out small numbers
+                    summary.amounts.push({
+                        display: amount,
+                        numeric: numValue
+                    });
+                }
+            });
+            
+            // Sort amounts by value (highest first)
+            summary.amounts.sort((a, b) => b.numeric - a.numeric);
+            
+            // Calculate statistics
+            if (summary.amounts.length > 0) {
+                const values = summary.amounts.map(a => a.numeric);
+                summary.keyStats = {
+                    totalAmounts: values.length,
+                    highest: Math.max(...values),
+                    lowest: Math.min(...values),
+                    average: values.reduce((a, b) => a + b, 0) / values.length,
+                    total: values.reduce((a, b) => a + b, 0)
+                };
+            }
+            
+            return summary;
+        }<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -516,71 +570,232 @@
             }
             
             // Create summary
-            extractedData.summary = createSummary(extractedData.allText);
+            const basicSummary = createSummary(extractedData.allText);
+            const parsedTableData = parseAISTableData(extractedData.allText, extractedData.pages);
+            
+            extractedData.summary = basicSummary;
+            extractedData.aisTableData = parsedTableData;
             
             return extractedData;
         }
         
-        function createSummary(allText) {
-            const summary = {
-                taxpayerInfo: {},
-                amounts: [],
-                keyStats: {}
-            };
+        function parseAISTableData(allText, pages) {
+            const aisData = [];
+            let srNo = 1;
             
-            // Extract PAN
-            const panMatch = allText.match(/(?:PAN|Permanent Account Number)[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i);
-            if (panMatch) summary.taxpayerInfo.pan = panMatch[1];
+            // Split text into sections and look for tabular data patterns
+            const lines = allText.split('\n').filter(line => line.trim());
             
-            // Extract Name
-            const nameMatch = allText.match(/(?:Name)[:\s]*([A-Z][A-Z\s]{5,50}?)(?:\s(?:PAN|DOB|Address|Father))/i);
-            if (nameMatch) summary.taxpayerInfo.name = nameMatch[1].trim();
+            // Look for typical AIS/TIS patterns
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                
+                // Skip empty lines and headers
+                if (!line || line.includes('AIS') || line.includes('TIS') || 
+                    line.includes('ANNUAL INFORMATION STATEMENT') || 
+                    line.includes('TAX INFORMATION STATEMENT')) {
+                    continue;
+                }
+                
+                // Look for information codes (typically start with numbers or codes)
+                const infoCodeMatch = line.match(/^(\d+[A-Z]*|\w{2,5}-\d+)/);
+                if (infoCodeMatch) {
+                    const infoCode = infoCodeMatch[1];
+                    
+                    // Try to extract other fields from the same line or subsequent lines
+                    let description = '';
+                    let source = '';
+                    let paymentDate = '';
+                    let amountPaid = '';
+                    let tdsDeducted = '';
+                    
+                    // Look for description (usually follows the code)
+                    const descMatch = line.match(/(?:\d+[A-Z]*|\w{2,5}-\d+)\s+(.+?)(?:\d{2}\/\d{2}\/\d{4}|Rs\.?\s*\d|₹|\d{1,3}(?:,\d{3})*)/);
+                    if (descMatch) {
+                        description = descMatch[1].trim();
+                    }
+                    
+                    // Look for dates in DD/MM/YYYY or DD-MM-YYYY format
+                    const dateMatch = line.match(/(\d{2}[\/\-]\d{2}[\/\-]\d{4})/);
+                    if (dateMatch) {
+                        paymentDate = dateMatch[1];
+                    }
+                    
+                    // Look for amounts (with or without currency symbols)
+                    const amountMatches = [...line.matchAll(/(?:Rs\.?\s*|₹\s*)?(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
+                    if (amountMatches.length >= 1) {
+                        amountPaid = amountMatches[0][1];
+                    }
+                    if (amountMatches.length >= 2) {
+                        tdsDeducted = amountMatches[1][1];
+                    }
+                    
+                    // Look for source information (PAN, company names, etc.)
+                    const panMatch = line.match(/([A-Z]{5}[0-9]{4}[A-Z]{1})/);
+                    if (panMatch) {
+                        source = panMatch[1];
+                    }
+                    
+                    // If we didn't find description in the same line, look in next few lines
+                    if (!description && i + 1 < lines.length) {
+                        const nextLine = lines[i + 1].trim();
+                        if (nextLine && !nextLine.match(/^\d/) && !nextLine.match(/^[A-Z]{5}[0-9]{4}[A-Z]{1}/)) {
+                            description = nextLine;
+                        }
+                    }
+                    
+                    aisData.push({
+                        srNo: srNo++,
+                        infoCode: infoCode,
+                        description: description || 'Not specified',
+                        source: source || 'Not specified',
+                        paymentDate: paymentDate || 'Not specified',
+                        amountPaid: amountPaid || '0',
+                        tdsDeducted: tdsDeducted || '0'
+                    });
+                }
+            }
             
-            // Extract Financial Year
-            const fyMatch = allText.match(/(?:Financial Year|FY|Assessment Year|AY)[:\s]*(\d{4}-\d{2,4})/i);
-            if (fyMatch) summary.taxpayerInfo.financialYear = fyMatch[1];
-            
-            // Extract DOB
-            const dobMatch = allText.match(/(?:DOB|Date of Birth)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
-            if (dobMatch) summary.taxpayerInfo.dob = dobMatch[1];
-            
-            // Extract all amounts
-            const amountPattern = /(?:Rs\.?|INR|₹)?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi;
-            const amounts = [...allText.matchAll(amountPattern)];
-            
-            amounts.forEach(match => {
-                const amount = match[1];
-                const numValue = parseFloat(amount.replace(/,/g, ''));
-                if (numValue >= 100) { // Filter out small numbers
-                    summary.amounts.push({
-                        display: amount,
-                        numeric: numValue
+            // Alternative parsing: Look for structured data in each page
+            pages.forEach(page => {
+                if (page.tableRows && page.tableRows.length > 0) {
+                    page.tableRows.forEach(row => {
+                        if (row.length >= 4) { // Minimum columns for AIS data
+                            // Check if this looks like data row (not header)
+                            const firstCol = row[0];
+                            if (firstCol && (firstCol.match(/^\d+/) || firstCol.match(/^\w{2,5}-\d+/))) {
+                                
+                                // Extract amounts from all columns
+                                const amounts = [];
+                                row.forEach(col => {
+                                    const amountMatch = col.match(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/);
+                                    if (amountMatch) {
+                                        amounts.push(amountMatch[1]);
+                                    }
+                                });
+                                
+                                // Extract date
+                                const datePattern = /(\d{2}[\/\-]\d{2}[\/\-]\d{4})/;
+                                let dateFound = '';
+                                for (let col of row) {
+                                    const match = col.match(datePattern);
+                                    if (match) {
+                                        dateFound = match[1];
+                                        break;
+                                    }
+                                }
+                                
+                                // Extract PAN
+                                const panPattern = /([A-Z]{5}[0-9]{4}[A-Z]{1})/;
+                                let panFound = '';
+                                for (let col of row) {
+                                    const match = col.match(panPattern);
+                                    if (match) {
+                                        panFound = match[1];
+                                        break;
+                                    }
+                                }
+                                
+                                aisData.push({
+                                    srNo: srNo++,
+                                    infoCode: row[0],
+                                    description: row[1] || 'Not specified',
+                                    source: panFound || row[2] || 'Not specified',
+                                    paymentDate: dateFound || 'Not specified',
+                                    amountPaid: amounts[0] || '0',
+                                    tdsDeducted: amounts[1] || '0'
+                                });
+                            }
+                        }
                     });
                 }
             });
             
-            // Sort amounts by value (highest first)
-            summary.amounts.sort((a, b) => b.numeric - a.numeric);
+            // Remove duplicates based on info code and amount
+            const uniqueData = [];
+            const seen = new Set();
             
-            // Calculate statistics
-            if (summary.amounts.length > 0) {
-                const values = summary.amounts.map(a => a.numeric);
-                summary.keyStats = {
-                    totalAmounts: values.length,
-                    highest: Math.max(...values),
-                    lowest: Math.min(...values),
-                    average: values.reduce((a, b) => a + b, 0) / values.length,
-                    total: values.reduce((a, b) => a + b, 0)
-                };
-            }
+            aisData.forEach(item => {
+                const key = `${item.infoCode}-${item.amountPaid}-${item.paymentDate}`;
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    uniqueData.push(item);
+                }
+            });
             
-            return summary;
+            return uniqueData;
         }
         
         async function createExcelFile(data) {
             const workbook = XLSX.utils.book_new();
             
-            // 1. Create Summary Sheet
+            // 1. Create AIS/TIS Structured Data Sheet (MAIN SHEET)
+            const structuredData = [
+                ['AIS/TIS DATA IN STANDARD FORMAT'],
+                ['Generated on:', new Date().toLocaleString()],
+                ['PAN:', data.summary.taxpayerInfo.pan || 'Not Found'],
+                ['Name:', data.summary.taxpayerInfo.name || 'Not Found'],
+                ['Financial Year:', data.summary.taxpayerInfo.financialYear || 'Not Found'],
+                [''],
+                ['SR. NO.', 'INFORMATION CODE', 'INFORMATION DESCRIPTION', 'INFORMATION SOURCE', 'DATE OF PAYMENT/CREDIT', 'AMOUNT PAID/CREDITED', 'TDS DEDUCTED']
+            ];
+            
+            // Add parsed AIS data
+            if (data.aisTableData && data.aisTableData.length > 0) {
+                data.aisTableData.forEach(row => {
+                    structuredData.push([
+                        row.srNo,
+                        row.infoCode,
+                        row.description,
+                        row.source,
+                        row.paymentDate,
+                        row.amountPaid,
+                        row.tdsDeducted
+                    ]);
+                });
+            } else {
+                structuredData.push(['No structured data found', '', '', '', '', '', '']);
+            }
+            
+            // Add totals row
+            if (data.aisTableData && data.aisTableData.length > 0) {
+                const totalPaid = data.aisTableData.reduce((sum, row) => {
+                    const amount = parseFloat(row.amountPaid.replace(/,/g, '')) || 0;
+                    return sum + amount;
+                }, 0);
+                
+                const totalTDS = data.aisTableData.reduce((sum, row) => {
+                    const tds = parseFloat(row.tdsDeducted.replace(/,/g, '')) || 0;
+                    return sum + tds;
+                }, 0);
+                
+                structuredData.push([
+                    '',
+                    '',
+                    '',
+                    '',
+                    'TOTAL:',
+                    totalPaid.toLocaleString('en-IN'),
+                    totalTDS.toLocaleString('en-IN')
+                ]);
+            }
+            
+            const structuredSheet = XLSX.utils.aoa_to_sheet(structuredData);
+            
+            // Style the structured sheet
+            structuredSheet['!cols'] = [
+                { width: 8 },   // SR. NO.
+                { width: 18 },  // INFORMATION CODE
+                { width: 35 },  // INFORMATION DESCRIPTION
+                { width: 20 },  // INFORMATION SOURCE
+                { width: 18 },  // DATE OF PAYMENT/CREDIT
+                { width: 20 },  // AMOUNT PAID/CREDITED
+                { width: 15 }   // TDS DEDUCTED
+            ];
+            
+            XLSX.utils.book_append_sheet(workbook, structuredSheet, 'AIS_TIS_Data');
+            
+            // 2. Create Summary Sheet
             const summaryData = [
                 ['AIS/TIS SUMMARY REPORT'],
                 ['Generated on:', new Date().toLocaleString()],
@@ -593,38 +808,37 @@
                 [''],
                 ['=== DOCUMENT SUMMARY ==='],
                 ['Total Pages', data.pages.length],
+                ['Total Records Found', data.aisTableData ? data.aisTableData.length : 0],
                 ['Processing Date', new Date().toLocaleDateString()],
-                ['Processing Time', new Date().toLocaleTimeString()],
                 [''],
                 ['=== FINANCIAL SUMMARY ===']
             ];
             
-            if (data.summary.keyStats.totalAmounts > 0) {
+            if (data.aisTableData && data.aisTableData.length > 0) {
+                const amounts = data.aisTableData.map(row => parseFloat(row.amountPaid.replace(/,/g, '')) || 0);
+                const tdsAmounts = data.aisTableData.map(row => parseFloat(row.tdsDeducted.replace(/,/g, '')) || 0);
+                
+                const totalAmount = amounts.reduce((a, b) => a + b, 0);
+                const totalTDS = tdsAmounts.reduce((a, b) => a + b, 0);
+                const avgAmount = totalAmount / amounts.length;
+                
                 summaryData.push(
-                    ['Total Amounts Found', data.summary.keyStats.totalAmounts],
-                    ['Highest Amount (Rs.)', data.summary.keyStats.highest.toLocaleString('en-IN')],
-                    ['Lowest Amount (Rs.)', data.summary.keyStats.lowest.toLocaleString('en-IN')],
-                    ['Average Amount (Rs.)', Math.round(data.summary.keyStats.average).toLocaleString('en-IN')],
-                    ['Total Sum (Rs.)', data.summary.keyStats.total.toLocaleString('en-IN')]
+                    ['Total Records', amounts.length],
+                    ['Total Amount Paid/Credited (Rs.)', totalAmount.toLocaleString('en-IN')],
+                    ['Total TDS Deducted (Rs.)', totalTDS.toLocaleString('en-IN')],
+                    ['Average Amount (Rs.)', Math.round(avgAmount).toLocaleString('en-IN')],
+                    ['Highest Amount (Rs.)', Math.max(...amounts).toLocaleString('en-IN')],
+                    ['Lowest Amount (Rs.)', Math.min(...amounts).toLocaleString('en-IN')]
                 );
             } else {
-                summaryData.push(['No amounts found', '']);
-            }
-            
-            summaryData.push([''], ['=== ALL AMOUNTS FOUND ==='], ['Sr.No.', 'Amount (Rs.)', 'Numeric Value']);
-            
-            // Add all amounts
-            if (data.summary.amounts.length > 0) {
-                data.summary.amounts.forEach((amount, index) => {
-                    summaryData.push([index + 1, amount.display, amount.numeric]);
-                });
+                summaryData.push(['No structured data found', '']);
             }
             
             const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
-            summarySheet['!cols'] = [{ width: 25 }, { width: 20 }, { width: 15 }];
+            summarySheet['!cols'] = [{ width: 30 }, { width: 25 }];
             XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
             
-            // 2. Create Individual Page Sheets (Original Format)
+            // 3. Create Individual Page Sheets (Original Format)
             data.pages.forEach(page => {
                 const pageData = [
                     [`PAGE ${page.pageNumber} - ORIGINAL FORMAT`],
@@ -655,39 +869,10 @@
                 XLSX.utils.book_append_sheet(workbook, pageSheet, `Page_${page.pageNumber}`);
             });
             
-            // 3. Create Combined Data Sheet
-            const combinedData = [
-                ['ALL PAGES COMBINED DATA'],
-                [''],
-                ['=== COMPLETE AIS/TIS DOCUMENT ==='],
-                ['']
-            ];
-            
-            data.pages.forEach(page => {
-                combinedData.push([`--- PAGE ${page.pageNumber} ---`]);
-                
-                if (page.tableRows && page.tableRows.length > 0) {
-                    page.tableRows.forEach(row => {
-                        combinedData.push(row);
-                    });
-                } else {
-                    page.lines.forEach(line => {
-                        if (line.trim()) {
-                            combinedData.push([line]);
-                        }
-                    });
-                }
-                combinedData.push(['']); // Space between pages
-            });
-            
-            const combinedSheet = XLSX.utils.aoa_to_sheet(combinedData);
-            combinedSheet['!cols'] = Array(10).fill().map(() => ({ width: 12 }));
-            XLSX.utils.book_append_sheet(workbook, combinedSheet, 'All_Pages_Combined');
-            
             // 4. Create Raw Text Sheet (for reference)
             const rawTextData = [
                 ['RAW TEXT EXTRACTION'],
-                ['Complete text content from all pages'],
+                ['Complete text content from all pages for reference'],
                 [''],
                 [data.allText]
             ];
