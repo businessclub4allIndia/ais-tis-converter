@@ -1,895 +1,400 @@
-function createSummary(allText) {
-            const summary = {
-                taxpayerInfo: {},
-                amounts: [],
-                keyStats: {}
-            };
-            
-            // Extract PAN
-            const panMatch = allText.match(/(?:PAN|Permanent Account Number)[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i);
-            if (panMatch) summary.taxpayerInfo.pan = panMatch[1];
-            
-            // Extract Name
-            const nameMatch = allText.match(/(?:Name)[:\s]*([A-Z][A-Z\s]{5,50}?)(?:\s(?:PAN|DOB|Address|Father))/i);
-            if (nameMatch) summary.taxpayerInfo.name = nameMatch[1].trim();
-            
-            // Extract Financial Year
-            const fyMatch = allText.match(/(?:Financial Year|FY|Assessment Year|AY)[:\s]*(\d{4}-\d{2,4})/i);
-            if (fyMatch) summary.taxpayerInfo.financialYear = fyMatch[1];
-            
-            // Extract DOB
-            const dobMatch = allText.match(/(?:DOB|Date of Birth)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
-            if (dobMatch) summary.taxpayerInfo.dob = dobMatch[1];
-            
-            // Extract all amounts
-            const amountPattern = /(?:Rs\.?|INR|₹)?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi;
-            const amounts = [...allText.matchAll(amountPattern)];
-            
-            amounts.forEach(match => {
-                const amount = match[1];
-                const numValue = parseFloat(amount.replace(/,/g, ''));
-                if (numValue >= 100) { // Filter out small numbers
-                    summary.amounts.push({
-                        display: amount,
-                        numeric: numValue
-                    });
-                }
-            });
-            
-            // Sort amounts by value (highest first)
-            summary.amounts.sort((a, b) => b.numeric - a.numeric);
-            
-            // Calculate statistics
-            if (summary.amounts.length > 0) {
-                const values = summary.amounts.map(a => a.numeric);
-                summary.keyStats = {
-                    totalAmounts: values.length,
-                    highest: Math.max(...values),
-                    lowest: Math.min(...values),
-                    average: values.reduce((a, b) => a + b, 0) / values.length,
-                    total: values.reduce((a, b) => a + b, 0)
-                };
-            }
-            
-            return summary;
-        }<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AIS/TIS PDF to Excel Converter</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 20px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
-            backdrop-filter: blur(10px);
-            overflow: hidden;
-        }
-        
-        .header {
-            background: linear-gradient(135deg, #FF6B35 0%, #F7931E 100%);
-            color: white;
-            text-align: center;
-            padding: 30px 20px;
-        }
-        
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            font-weight: 700;
-        }
-        
-        .header p {
-            font-size: 1.1em;
-            opacity: 0.9;
-        }
-        
-        .form-section {
-            padding: 40px;
-        }
-        
-        .form-group {
-            margin-bottom: 25px;
-        }
-        
-        .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #333;
-            font-size: 1.1em;
-        }
-        
-        .form-group input {
-            width: 100%;
-            padding: 15px;
-            border: 2px solid #e1e5e9;
-            border-radius: 10px;
-            font-size: 16px;
-            transition: all 0.3s ease;
-        }
-        
-        .form-group input:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        .file-upload {
-            position: relative;
-            display: inline-block;
-            width: 100%;
-        }
-        
-        .file-upload input[type=file] {
-            position: absolute;
-            left: -9999px;
-        }
-        
-        .file-upload-label {
-            display: block;
-            padding: 20px;
-            border: 3px dashed #ccc;
-            border-radius: 10px;
-            text-align: center;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            background: #f8f9fa;
-        }
-        
-        .file-upload-label:hover {
-            border-color: #667eea;
-            background: #f0f2ff;
-        }
-        
-        .file-upload-label.dragover {
-            border-color: #667eea;
-            background: #e3f2fd;
-        }
-        
-        .convert-btn {
-            width: 100%;
-            padding: 18px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 18px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            margin-top: 20px;
-        }
-        
-        .convert-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
-        
-        .convert-btn:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        
-        .progress-container {
-            display: none;
-            margin: 20px 0;
-        }
-        
-        .progress-bar {
-            width: 100%;
-            height: 10px;
-            background: #e1e5e9;
-            border-radius: 5px;
-            overflow: hidden;
-        }
-        
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #667eea, #764ba2);
-            width: 0%;
-            transition: width 0.3s ease;
-        }
-        
-        .status {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 8px;
-            text-align: center;
-            display: none;
-        }
-        
-        .status.success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-        
-        .status.error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-        
-        .password-info {
-            background: #e3f2fd;
-            border-left: 4px solid #2196F3;
-            padding: 15px;
-            margin-bottom: 20px;
-            border-radius: 0 8px 8px 0;
-        }
-        
-        .password-info strong {
-            color: #1976D2;
-        }
-        
-        .features {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-            margin-top: 30px;
-        }
-        
-        .feature {
-            background: rgba(102, 126, 234, 0.1);
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-        }
-        
-        .feature-icon {
-            font-size: 2em;
-            margin-bottom: 10px;
-        }
-        
-        .loading {
-            display: none;
-            text-align: center;
-            margin: 20px 0;
-        }
-        
-        .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 10px;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIS/TIS PDF → Excel (Single File)</title>
+  <style>
+    :root { --bg:#f6f7fb; --card:#fff; --fg:#111; --muted:#555; --primary:#1f6feb; }
+    body { margin:0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--fg); }
+    .wrap { max-width: 980px; margin: 32px auto; padding: 0 16px; }
+    .card { background:var(--card); border-radius:20px; box-shadow: 0 10px 30px rgba(0,0,0,.08); padding:24px; }
+    h1 { margin:0 0 10px; font-size: 28px; }
+    p.lead { margin:0 0 16px; color:var(--muted); }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    label { font-weight: 600; font-size: 14px; }
+    input[type="text"], input[type="file"] {
+      width:100%; padding:10px 12px; border-radius:12px; border:1px solid #ddd; outline:none;
+    }
+    .row { display:flex; gap:12px; align-items:center; margin-top: 16px; flex-wrap: wrap; }
+    button { background:var(--primary); color:#fff; border:none; padding:10px 16px; border-radius:12px; cursor:pointer; }
+    button.secondary { background:#e5e7eb; color:#111; }
+    .msg { font-size:14px; }
+    .msg.error { color:crimson; }
+    .msg.ok { color:green; }
+    details { margin-top: 14px; }
+    table { border-collapse: collapse; font-size: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #f2f2f2; }
+    footer { margin-top:16px; color:#777; font-size:12px; }
+    .hint { color:#666; font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  </style>
+  <!-- pdf.js (supports password-protected PDFs) -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.js"></script>
+  <script>
+    // pdf.js worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.js";
+  </script>
+  <!-- SheetJS for XLSX creation -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🏛️ AIS/TIS Converter</h1>
-            <p>Convert Income Tax AIS/TIS PDFs to Excel with Original Format + Summary</p>
-        </div>
-        
-        <div class="form-section">
-            <div class="password-info">
-                <strong>📝 Password Format:</strong> PAN (lowercase) + Date of Birth (DDMMYYYY)<br>
-                <em>Example: If PAN is ABCDE1234F and DOB is 15/03/1990, password would be: abcde1234f15031990</em>
-            </div>
-            
-            <div class="form-group">
-                <label for="panInput">PAN Number:</label>
-                <input type="text" id="panInput" placeholder="Enter PAN (e.g., ABCDE1234F)" maxlength="10" style="text-transform: uppercase;">
-            </div>
-            
-            <div class="form-group">
-                <label for="dobInput">Date of Birth:</label>
-                <input type="date" id="dobInput">
-            </div>
-            
-            <div class="form-group">
-                <label for="manualPassword">Or Enter Password Manually:</label>
-                <input type="password" id="manualPassword" placeholder="Enter PDF password manually">
-            </div>
-            
-            <div class="form-group">
-                <label>Select AIS/TIS PDF File:</label>
-                <div class="file-upload">
-                    <input type="file" id="pdfFile" accept=".pdf">
-                    <label for="pdfFile" class="file-upload-label" id="fileLabel">
-                        <div style="font-size: 2em; margin-bottom: 10px;">📄</div>
-                        <div>Click to select PDF file or drag and drop here</div>
-                        <div style="font-size: 0.9em; color: #666; margin-top: 5px;">Supports password-protected AIS/TIS PDFs</div>
-                    </label>
-                </div>
-            </div>
-            
-            <button class="convert-btn" id="convertBtn">Convert to Excel</button>
-            
-            <div class="progress-container" id="progressContainer">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progressFill"></div>
-                </div>
-                <div style="text-align: center; margin-top: 10px;" id="progressText">Processing...</div>
-            </div>
-            
-            <div class="loading" id="loading">
-                <div class="spinner"></div>
-                <div>Processing PDF... Please wait</div>
-            </div>
-            
-            <div class="status" id="status"></div>
-            
-            <div class="features">
-                <div class="feature">
-                    <div class="feature-icon">🔐</div>
-                    <h3>Password Protected</h3>
-                    <p>Handles AIS/TIS password-protected PDFs automatically</p>
-                </div>
-                <div class="feature">
-                    <div class="feature-icon">📊</div>
-                    <h3>Original + Summary</h3>
-                    <p>Preserves original format plus adds summary analysis</p>
-                </div>
-                <div class="feature">
-                    <div class="feature-icon">🚀</div>
-                    <h3>Table Structure</h3>
-                    <p>Maintains headers, columns, and row structure</p>
-                </div>
-            </div>
-        </div>
-    </div>
+  <div class="wrap">
+    <div class="card">
+      <h1>AIS/TIS PDF → Excel Converter</h1>
+      <p class="lead">Upload your AIS/TIS PDF, enter the password (<b>lowercase PAN + DDMMYYYY</b>), and download an Excel file with your requested columns plus a Summary sheet.</p>
 
-    <script>
-        // Global variables
-        let selectedFile = null;
-        
-        // Initialize PDF.js
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        
-        // DOM elements
-        const panInput = document.getElementById('panInput');
-        const dobInput = document.getElementById('dobInput');
-        const manualPassword = document.getElementById('manualPassword');
-        const pdfFileInput = document.getElementById('pdfFile');
-        const fileLabel = document.getElementById('fileLabel');
-        const convertBtn = document.getElementById('convertBtn');
-        const progressContainer = document.getElementById('progressContainer');
-        const progressFill = document.getElementById('progressFill');
-        const progressText = document.getElementById('progressText');
-        const status = document.getElementById('status');
-        const loading = document.getElementById('loading');
-        
-        // File upload handling
-        pdfFileInput.addEventListener('change', handleFileSelect);
-        
-        // Drag and drop handling
-        fileLabel.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            fileLabel.classList.add('dragover');
-        });
-        
-        fileLabel.addEventListener('dragleave', () => {
-            fileLabel.classList.remove('dragover');
-        });
-        
-        fileLabel.addEventListener('drop', (e) => {
-            e.preventDefault();
-            fileLabel.classList.remove('dragover');
-            const files = e.dataTransfer.files;
-            if (files.length > 0 && files[0].type === 'application/pdf') {
-                pdfFileInput.files = files;
-                handleFileSelect();
-            }
-        });
-        
-        function handleFileSelect() {
-            const file = pdfFileInput.files[0];
-            if (file) {
-                selectedFile = file;
-                fileLabel.innerHTML = `
-                    <div style="font-size: 2em; margin-bottom: 10px;">✅</div>
-                    <div><strong>${file.name}</strong></div>
-                    <div style="font-size: 0.9em; color: #666; margin-top: 5px;">Size: ${(file.size / 1024 / 1024).toFixed(2)} MB</div>
-                `;
-            }
+      <div class="grid">
+        <div>
+          <label>PDF file</label><br>
+          <input id="pdfFile" type="file" accept="application/pdf">
+          <div class="hint">Works for text-based PDFs (not scanned images).</div>
+        </div>
+        <div>
+          <label>Password</label><br>
+          <input id="password" type="text" placeholder="e.g. abcde1234f01011990" class="mono">
+          <div class="hint">Rule: lowercase <b>PAN</b> + <b>DDMMYYYY</b></div>
+        </div>
+        <div>
+          <label>PAN (helper)</label><br>
+          <input id="pan" type="text" placeholder="abcde1234f" oninput="this.value=this.value.toLowerCase()" class="mono">
+        </div>
+        <div>
+          <label>DOB (DDMMYYYY or YYYY-MM-DD)</label><br>
+          <input id="dob" type="text" placeholder="01011990" class="mono">
+          <div class="row">
+            <button class="secondary" id="btnBuildPw">Build Password</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="btnConvert">Convert to Excel</button>
+        <span id="status" class="msg"></span>
+      </div>
+
+      <details>
+        <summary>Output columns</summary>
+        <div style="padding-top:8px;overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>SR. NO.</th>
+                <th>INFORMATION CODE</th>
+                <th>INFORMATION DESCRIPTION</th>
+                <th>INFORMATION SOURCE</th>
+                <th>DATE OF PAYMENT/CREDIT</th>
+                <th>AMOUNT PAID/CREDITED</th>
+                <th>TDS DEDUCTED</th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="7" style="text-align:center">Generated from your PDF</td></tr></tbody>
+          </table>
+        </div>
+      </details>
+
+      <footer>All processing happens in your browser. No data is uploaded to any server.</footer>
+    </div>
+  </div>
+
+<script>
+// ---------- Utilities ----------
+const TARGET_COLUMNS = [
+  "SR. NO.",
+  "INFORMATION CODE",
+  "INFORMATION DESCRIPTION",
+  "INFORMATION SOURCE",
+  "DATE OF PAYMENT/CREDIT",
+  "AMOUNT PAID/CREDITED",
+  "TDS DEDUCTED"
+];
+
+const HEADER_MAP = new Map(Object.entries({
+  "sr no":"SR. NO.","sr. no.":"SR. NO.","s.no":"SR. NO.","s no":"SR. NO.",
+  "information code":"INFORMATION CODE","info code":"INFORMATION CODE",
+  "information description":"INFORMATION DESCRIPTION","description":"INFORMATION DESCRIPTION",
+  "information source":"INFORMATION SOURCE","source":"INFORMATION SOURCE",
+  "date of payment/credit":"DATE OF PAYMENT/CREDIT","date":"DATE OF PAYMENT/CREDIT",
+  "amount paid/credited":"AMOUNT PAID/CREDITED","amount":"AMOUNT PAID/CREDITED",
+  "tds deducted":"TDS DEDUCTED","tds":"TDS DEDUCTED"
+}));
+
+function normalizeHeader(h){
+  const k = String(h||"").trim().toLowerCase().replace(/\s+/g," ");
+  return HEADER_MAP.get(k) || null;
+}
+
+function parseNumber(s){
+  if (s==null) return null;
+  s = String(s).trim();
+  if (!s || s==='-' || s==='—') return null;
+  let neg = false;
+  if (s.startsWith('(') && s.endsWith(')')) { neg = true; s = s.slice(1,-1); }
+  s = s.replace(/[₹,\s]/g,'');
+  const m = s.match(/-?\d+(?:\.\d+)?/);
+  if (!m) return null;
+  const v = parseFloat(m[0]);
+  return neg ? -v : v;
+}
+
+function parseDateMaybe(s){
+  if (s==null) return null;
+  s = String(s).trim();
+  if (!s) return null;
+  const t = s.replace(/[./]/g,'-');
+  const fmts = [
+    [/^(\d{2})-(\d{2})-(\d{4})$/, (d,m,y)=>`${y}-${m}-${d}`],
+    [/^(\d{2})-([A-Za-z]{3})-(\d{4})$/, (d,mon,y)=>`${y}-${mon}-${d}`], // keep as text
+    [/^(\d{2}) (\w{3}) (\d{4})$/, (d,mon,y)=>`${y}-${mon}-${d}`],
+    [/^(\d{2})(\d{2})(\d{4})$/, (d,m,y)=>`${y}-${m}-${d}`]
+  ];
+  for (const [re,fmt] of fmts){
+    const m = t.match(re);
+    if (m){ return fmt(...m.slice(1)); }
+  }
+  return s; // leave as-is
+}
+
+function groupBy(arr, keyFn){
+  const m = new Map();
+  for (const x of arr){
+    const k = keyFn(x);
+    m.set(k, (m.get(k)||[]).concat([x]));
+  }
+  return m;
+}
+
+function toSheet(wsName, rows){
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  return [wsName, ws];
+}
+
+// ---------- Password helper ----------
+function ddmmyyyyFromAny(dob){
+  if (!dob) return "";
+  let s = String(dob).trim();
+  s = s.replace(/[-/]/g,'');
+  if (s.length===8){
+    // could be ddmmyyyy or yyyymmdd -> detect YYYY first
+    if (parseInt(s.slice(0,4)) > 1900){ // yyyymmdd
+      return s.slice(6,8)+s.slice(4,6)+s.slice(0,4);
+    }
+    return s;
+  }
+  return "";
+}
+
+document.getElementById("btnBuildPw").addEventListener("click", ()=>{
+  const pan = (document.getElementById("pan").value||"").trim().toLowerCase();
+  const dob = ddmmyyyyFromAny(document.getElementById("dob").value);
+  if (!pan || !dob){
+    setStatus("Provide PAN and DOB to build password.", true);
+    return;
+  }
+  document.getElementById("password").value = pan + dob;
+  setStatus("Password prepared. Verify and click Convert.", false);
+});
+
+// ---------- Core: read PDF with password and extract text ----------
+async function readPdfTextLines(arrayBuffer, password){
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  loadingTask.onPassword = (updatePassword, reason)=>{
+    // 1 = NEED_PASSWORD, 2 = INCORRECT_PASSWORD
+    updatePassword(password || "");
+  };
+  const pdf = await loadingTask.promise;
+  const lines = [];
+  for (let p=1;p<=pdf.numPages;p++){
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    // build lines by y position (transform[5] is y, but we can use item.transform)
+    const items = content.items.map(it=>{
+      const [a,b,c,d,e,f] = it.transform;
+      const x = e, y = f;
+      const width = it.width;
+      return {str:it.str, x, y, width};
+    });
+    // group items by y (tolerance)
+    items.sort((u,v)=> v.y - u.y || u.x - v.x);
+    const rows = [];
+    let currentY = null, current = [];
+    const tol = 2.5;
+    for (const it of items){
+      if (currentY===null) { currentY = it.y; current=[it]; continue; }
+      if (Math.abs(it.y - currentY) <= tol){
+        current.push(it);
+      } else {
+        rows.push(current);
+        current = [it];
+        currentY = it.y;
+      }
+    }
+    if (current.length) rows.push(current);
+
+    // convert row items to a string with tab separators based on gaps
+    for (const row of rows){
+      row.sort((a,b)=> a.x - b.x);
+      let out = [];
+      for (let i=0;i<row.length;i++){
+        const it = row[i];
+        out.push(it.str);
+        if (i<row.length-1){
+          const currEnd = it.x + it.width;
+          const nextStart = row[i+1].x;
+          const gap = nextStart - currEnd;
+          if (gap > 8) out.push("\t");
+          else out.push(" ");
         }
-        
-        // Convert button handler
-        convertBtn.addEventListener('click', convertPdfToExcel);
-        
-        function getPassword() {
-            // Check if manual password is provided
-            if (manualPassword.value.trim()) {
-                return manualPassword.value.trim().toLowerCase();
-            }
-            
-            // Generate password from PAN and DOB (lowercase)
-            const pan = panInput.value.trim().toLowerCase();
-            const dob = dobInput.value;
-            
-            if (pan && dob) {
-                const dobFormatted = dob.split('-').reverse().join(''); // Convert YYYY-MM-DD to DDMMYYYY
-                return pan + dobFormatted;
-            }
-            
-            return null;
-        }
-        
-        function showStatus(message, type) {
-            status.textContent = message;
-            status.className = `status ${type}`;
-            status.style.display = 'block';
-        }
-        
-        function updateProgress(percent, text) {
-            progressFill.style.width = percent + '%';
-            progressText.textContent = text;
-        }
-        
-        async function convertPdfToExcel() {
-            if (!selectedFile) {
-                showStatus('Please select a PDF file first', 'error');
-                return;
-            }
-            
-            const password = getPassword();
-            if (!password) {
-                showStatus('Please provide password (either manually or via PAN + DOB)', 'error');
-                return;
-            }
-            
-            convertBtn.disabled = true;
-            loading.style.display = 'block';
-            progressContainer.style.display = 'block';
-            status.style.display = 'none';
-            
-            try {
-                updateProgress(10, 'Reading PDF file...');
-                
-                const arrayBuffer = await selectedFile.arrayBuffer();
-                
-                updateProgress(30, 'Processing PDF with password...');
-                
-                // Load PDF with password
-                const loadingTask = pdfjsLib.getDocument({
-                    data: arrayBuffer,
-                    password: password
-                });
-                
-                const pdf = await loadingTask.promise;
-                
-                updateProgress(50, 'Extracting data from PDF...');
-                
-                const extractedData = await extractDataFromPdf(pdf);
-                
-                updateProgress(80, 'Creating Excel file...');
-                
-                await createExcelFile(extractedData);
-                
-                updateProgress(100, 'Conversion completed!');
-                
-                showStatus('PDF successfully converted to Excel!', 'success');
-                
-            } catch (error) {
-                console.error('Conversion error:', error);
-                if (error.name === 'PasswordException') {
-                    showStatus('Invalid password. Please check your PAN and DOB or enter the correct password manually.', 'error');
-                } else {
-                    showStatus('Error converting PDF: ' + error.message, 'error');
-                }
-            } finally {
-                convertBtn.disabled = false;
-                loading.style.display = 'none';
-                setTimeout(() => {
-                    progressContainer.style.display = 'none';
-                }, 2000);
-            }
-        }
-        
-        async function extractDataFromPdf(pdf) {
-            const numPages = pdf.numPages;
-            let extractedData = {
-                pages: [],
-                allText: '',
-                summary: {}
-            };
-            
-            for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-                const page = await pdf.getPage(pageNum);
-                const textContent = await page.getTextContent();
-                
-                // Extract text with simple line-by-line approach
-                let pageText = '';
-                let currentLine = '';
-                let lastY = null;
-                
-                textContent.items.forEach(item => {
-                    // If Y position changed significantly, it's a new line
-                    if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
-                        if (currentLine.trim()) {
-                            pageText += currentLine.trim() + '\n';
-                        }
-                        currentLine = item.str;
-                    } else {
-                        currentLine += item.str;
-                    }
-                    lastY = item.transform[5];
-                });
-                
-                // Add the last line
-                if (currentLine.trim()) {
-                    pageText += currentLine.trim() + '\n';
-                }
-                
-                // Split into lines and create simple table structure
-                const lines = pageText.split('\n').filter(line => line.trim());
-                const tableRows = [];
-                
-                lines.forEach(line => {
-                    // Split line by multiple spaces (likely column separators)
-                    const columns = line.split(/\s{3,}/).map(col => col.trim()).filter(col => col);
-                    if (columns.length > 1) {
-                        tableRows.push(columns);
-                    } else if (line.trim()) {
-                        // Single column or header
-                        tableRows.push([line.trim()]);
-                    }
-                });
-                
-                extractedData.pages.push({
-                    pageNumber: pageNum,
-                    text: pageText,
-                    tableRows: tableRows,
-                    lines: lines
-                });
-                
-                extractedData.allText += pageText + '\n\n';
-                
-                updateProgress(50 + (pageNum / numPages) * 25, `Extracting page ${pageNum} of ${numPages}...`);
-            }
-            
-            // Create summary
-            const basicSummary = createSummary(extractedData.allText);
-            const parsedTableData = parseAISTableData(extractedData.allText, extractedData.pages);
-            
-            extractedData.summary = basicSummary;
-            extractedData.aisTableData = parsedTableData;
-            
-            return extractedData;
-        }
-        
-        function parseAISTableData(allText, pages) {
-            const aisData = [];
-            let srNo = 1;
-            
-            // Split text into sections and look for tabular data patterns
-            const lines = allText.split('\n').filter(line => line.trim());
-            
-            // Look for typical AIS/TIS patterns
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].trim();
-                
-                // Skip empty lines and headers
-                if (!line || line.includes('AIS') || line.includes('TIS') || 
-                    line.includes('ANNUAL INFORMATION STATEMENT') || 
-                    line.includes('TAX INFORMATION STATEMENT')) {
-                    continue;
-                }
-                
-                // Look for information codes (typically start with numbers or codes)
-                const infoCodeMatch = line.match(/^(\d+[A-Z]*|\w{2,5}-\d+)/);
-                if (infoCodeMatch) {
-                    const infoCode = infoCodeMatch[1];
-                    
-                    // Try to extract other fields from the same line or subsequent lines
-                    let description = '';
-                    let source = '';
-                    let paymentDate = '';
-                    let amountPaid = '';
-                    let tdsDeducted = '';
-                    
-                    // Look for description (usually follows the code)
-                    const descMatch = line.match(/(?:\d+[A-Z]*|\w{2,5}-\d+)\s+(.+?)(?:\d{2}\/\d{2}\/\d{4}|Rs\.?\s*\d|₹|\d{1,3}(?:,\d{3})*)/);
-                    if (descMatch) {
-                        description = descMatch[1].trim();
-                    }
-                    
-                    // Look for dates in DD/MM/YYYY or DD-MM-YYYY format
-                    const dateMatch = line.match(/(\d{2}[\/\-]\d{2}[\/\-]\d{4})/);
-                    if (dateMatch) {
-                        paymentDate = dateMatch[1];
-                    }
-                    
-                    // Look for amounts (with or without currency symbols)
-                    const amountMatches = [...line.matchAll(/(?:Rs\.?\s*|₹\s*)?(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
-                    if (amountMatches.length >= 1) {
-                        amountPaid = amountMatches[0][1];
-                    }
-                    if (amountMatches.length >= 2) {
-                        tdsDeducted = amountMatches[1][1];
-                    }
-                    
-                    // Look for source information (PAN, company names, etc.)
-                    const panMatch = line.match(/([A-Z]{5}[0-9]{4}[A-Z]{1})/);
-                    if (panMatch) {
-                        source = panMatch[1];
-                    }
-                    
-                    // If we didn't find description in the same line, look in next few lines
-                    if (!description && i + 1 < lines.length) {
-                        const nextLine = lines[i + 1].trim();
-                        if (nextLine && !nextLine.match(/^\d/) && !nextLine.match(/^[A-Z]{5}[0-9]{4}[A-Z]{1}/)) {
-                            description = nextLine;
-                        }
-                    }
-                    
-                    aisData.push({
-                        srNo: srNo++,
-                        infoCode: infoCode,
-                        description: description || 'Not specified',
-                        source: source || 'Not specified',
-                        paymentDate: paymentDate || 'Not specified',
-                        amountPaid: amountPaid || '0',
-                        tdsDeducted: tdsDeducted || '0'
-                    });
-                }
-            }
-            
-            // Alternative parsing: Look for structured data in each page
-            pages.forEach(page => {
-                if (page.tableRows && page.tableRows.length > 0) {
-                    page.tableRows.forEach(row => {
-                        if (row.length >= 4) { // Minimum columns for AIS data
-                            // Check if this looks like data row (not header)
-                            const firstCol = row[0];
-                            if (firstCol && (firstCol.match(/^\d+/) || firstCol.match(/^\w{2,5}-\d+/))) {
-                                
-                                // Extract amounts from all columns
-                                const amounts = [];
-                                row.forEach(col => {
-                                    const amountMatch = col.match(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/);
-                                    if (amountMatch) {
-                                        amounts.push(amountMatch[1]);
-                                    }
-                                });
-                                
-                                // Extract date
-                                const datePattern = /(\d{2}[\/\-]\d{2}[\/\-]\d{4})/;
-                                let dateFound = '';
-                                for (let col of row) {
-                                    const match = col.match(datePattern);
-                                    if (match) {
-                                        dateFound = match[1];
-                                        break;
-                                    }
-                                }
-                                
-                                // Extract PAN
-                                const panPattern = /([A-Z]{5}[0-9]{4}[A-Z]{1})/;
-                                let panFound = '';
-                                for (let col of row) {
-                                    const match = col.match(panPattern);
-                                    if (match) {
-                                        panFound = match[1];
-                                        break;
-                                    }
-                                }
-                                
-                                aisData.push({
-                                    srNo: srNo++,
-                                    infoCode: row[0],
-                                    description: row[1] || 'Not specified',
-                                    source: panFound || row[2] || 'Not specified',
-                                    paymentDate: dateFound || 'Not specified',
-                                    amountPaid: amounts[0] || '0',
-                                    tdsDeducted: amounts[1] || '0'
-                                });
-                            }
-                        }
-                    });
-                }
-            });
-            
-            // Remove duplicates based on info code and amount
-            const uniqueData = [];
-            const seen = new Set();
-            
-            aisData.forEach(item => {
-                const key = `${item.infoCode}-${item.amountPaid}-${item.paymentDate}`;
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    uniqueData.push(item);
-                }
-            });
-            
-            return uniqueData;
-        }
-        
-        async function createExcelFile(data) {
-            const workbook = XLSX.utils.book_new();
-            
-            // 1. Create AIS/TIS Structured Data Sheet (MAIN SHEET)
-            const structuredData = [
-                ['AIS/TIS DATA IN STANDARD FORMAT'],
-                ['Generated on:', new Date().toLocaleString()],
-                ['PAN:', data.summary.taxpayerInfo.pan || 'Not Found'],
-                ['Name:', data.summary.taxpayerInfo.name || 'Not Found'],
-                ['Financial Year:', data.summary.taxpayerInfo.financialYear || 'Not Found'],
-                [''],
-                ['SR. NO.', 'INFORMATION CODE', 'INFORMATION DESCRIPTION', 'INFORMATION SOURCE', 'DATE OF PAYMENT/CREDIT', 'AMOUNT PAID/CREDITED', 'TDS DEDUCTED']
-            ];
-            
-            // Add parsed AIS data
-            if (data.aisTableData && data.aisTableData.length > 0) {
-                data.aisTableData.forEach(row => {
-                    structuredData.push([
-                        row.srNo,
-                        row.infoCode,
-                        row.description,
-                        row.source,
-                        row.paymentDate,
-                        row.amountPaid,
-                        row.tdsDeducted
-                    ]);
-                });
-            } else {
-                structuredData.push(['No structured data found', '', '', '', '', '', '']);
-            }
-            
-            // Add totals row
-            if (data.aisTableData && data.aisTableData.length > 0) {
-                const totalPaid = data.aisTableData.reduce((sum, row) => {
-                    const amount = parseFloat(row.amountPaid.replace(/,/g, '')) || 0;
-                    return sum + amount;
-                }, 0);
-                
-                const totalTDS = data.aisTableData.reduce((sum, row) => {
-                    const tds = parseFloat(row.tdsDeducted.replace(/,/g, '')) || 0;
-                    return sum + tds;
-                }, 0);
-                
-                structuredData.push([
-                    '',
-                    '',
-                    '',
-                    '',
-                    'TOTAL:',
-                    totalPaid.toLocaleString('en-IN'),
-                    totalTDS.toLocaleString('en-IN')
-                ]);
-            }
-            
-            const structuredSheet = XLSX.utils.aoa_to_sheet(structuredData);
-            
-            // Style the structured sheet
-            structuredSheet['!cols'] = [
-                { width: 8 },   // SR. NO.
-                { width: 18 },  // INFORMATION CODE
-                { width: 35 },  // INFORMATION DESCRIPTION
-                { width: 20 },  // INFORMATION SOURCE
-                { width: 18 },  // DATE OF PAYMENT/CREDIT
-                { width: 20 },  // AMOUNT PAID/CREDITED
-                { width: 15 }   // TDS DEDUCTED
-            ];
-            
-            XLSX.utils.book_append_sheet(workbook, structuredSheet, 'AIS_TIS_Data');
-            
-            // 2. Create Summary Sheet
-            const summaryData = [
-                ['AIS/TIS SUMMARY REPORT'],
-                ['Generated on:', new Date().toLocaleString()],
-                [''],
-                ['=== TAXPAYER INFORMATION ==='],
-                ['PAN Number', data.summary.taxpayerInfo.pan || 'Not Found'],
-                ['Name', data.summary.taxpayerInfo.name || 'Not Found'],
-                ['Financial Year', data.summary.taxpayerInfo.financialYear || 'Not Found'],
-                ['Date of Birth', data.summary.taxpayerInfo.dob || 'Not Found'],
-                [''],
-                ['=== DOCUMENT SUMMARY ==='],
-                ['Total Pages', data.pages.length],
-                ['Total Records Found', data.aisTableData ? data.aisTableData.length : 0],
-                ['Processing Date', new Date().toLocaleDateString()],
-                [''],
-                ['=== FINANCIAL SUMMARY ===']
-            ];
-            
-            if (data.aisTableData && data.aisTableData.length > 0) {
-                const amounts = data.aisTableData.map(row => parseFloat(row.amountPaid.replace(/,/g, '')) || 0);
-                const tdsAmounts = data.aisTableData.map(row => parseFloat(row.tdsDeducted.replace(/,/g, '')) || 0);
-                
-                const totalAmount = amounts.reduce((a, b) => a + b, 0);
-                const totalTDS = tdsAmounts.reduce((a, b) => a + b, 0);
-                const avgAmount = totalAmount / amounts.length;
-                
-                summaryData.push(
-                    ['Total Records', amounts.length],
-                    ['Total Amount Paid/Credited (Rs.)', totalAmount.toLocaleString('en-IN')],
-                    ['Total TDS Deducted (Rs.)', totalTDS.toLocaleString('en-IN')],
-                    ['Average Amount (Rs.)', Math.round(avgAmount).toLocaleString('en-IN')],
-                    ['Highest Amount (Rs.)', Math.max(...amounts).toLocaleString('en-IN')],
-                    ['Lowest Amount (Rs.)', Math.min(...amounts).toLocaleString('en-IN')]
-                );
-            } else {
-                summaryData.push(['No structured data found', '']);
-            }
-            
-            const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
-            summarySheet['!cols'] = [{ width: 30 }, { width: 25 }];
-            XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
-            
-            // 3. Create Individual Page Sheets (Original Format)
-            data.pages.forEach(page => {
-                const pageData = [
-                    [`PAGE ${page.pageNumber} - ORIGINAL FORMAT`],
-                    [''],
-                    ['=== RAW DATA AS EXTRACTED ===']
-                ];
-                
-                // Add table rows if available
-                if (page.tableRows && page.tableRows.length > 0) {
-                    page.tableRows.forEach(row => {
-                        pageData.push(row);
-                    });
-                } else {
-                    // Fallback to lines
-                    page.lines.forEach(line => {
-                        if (line.trim()) {
-                            pageData.push([line]);
-                        }
-                    });
-                }
-                
-                const pageSheet = XLSX.utils.aoa_to_sheet(pageData);
-                
-                // Auto-size columns
-                const maxCols = Math.max(...pageData.map(row => row.length));
-                pageSheet['!cols'] = Array(maxCols).fill().map(() => ({ width: 15 }));
-                
-                XLSX.utils.book_append_sheet(workbook, pageSheet, `Page_${page.pageNumber}`);
-            });
-            
-            // 4. Create Raw Text Sheet (for reference)
-            const rawTextData = [
-                ['RAW TEXT EXTRACTION'],
-                ['Complete text content from all pages for reference'],
-                [''],
-                [data.allText]
-            ];
-            
-            const rawSheet = XLSX.utils.aoa_to_sheet(rawTextData);
-            rawSheet['!cols'] = [{ width: 100 }];
-            XLSX.utils.book_append_sheet(workbook, rawSheet, 'Raw_Text');
-            
-            // Generate and save file
-            const fileName = `AIS_TIS_${data.summary.taxpayerInfo.pan || 'Export'}_${new Date().toISOString().split('T')[0]}.xlsx`;
-            XLSX.writeFile(workbook, fileName);
-        }
-        
-        // Auto-uppercase PAN input
-        panInput.addEventListener('input', (e) => {
-            e.target.value = e.target.value.toUpperCase();
-        });
-    </script>
+      }
+      const s = out.join("").replace(/\s+\t/g,"\t").replace(/\t\s+/g,"\t").trim();
+      if (s) lines.push(s);
+    }
+  }
+  return lines;
+}
+
+// Heuristic: detect table header row and build a 2D array
+function linesToTable(lines){
+  // find header line that matches at least 3 known headers
+  let headerIdx = -1, headerCols = null;
+  for (let i=0;i<Math.min(30, lines.length); i++){
+    const parts = lines[i].split("\t").map(s=>s.trim());
+    const mapped = parts.map(normalizeHeader);
+    const score = mapped.filter(x=>x && TARGET_COLUMNS.includes(x)).length;
+    if (score >= 3) { headerIdx = i; headerCols = mapped; break; }
+  }
+  if (headerIdx === -1){
+    // Fallback: try space split
+    for (let i=0;i<Math.min(30, lines.length); i++){
+      const parts = lines[i].split(/\s{2,}/).map(s=>s.trim());
+      const mapped = parts.map(normalizeHeader);
+      const score = mapped.filter(x=>x && TARGET_COLUMNS.includes(x)).length;
+      if (score >= 3) { headerIdx = i; headerCols = mapped; break; }
+    }
+  }
+  if (headerIdx === -1) throw new Error("Could not find table headers. Ensure this is an AIS/TIS table page.");
+
+  // Build rows from headerIdx+1 until a blank-heavy line
+  const data = [];
+  for (let i=headerIdx+1; i<lines.length; i++){
+    let parts = lines[i].includes("\t") ? lines[i].split("\t") : lines[i].split(/\s{2,}/);
+    parts = parts.map(s=>s.trim()).filter(s=>s!=="");
+    if (parts.length < 2) continue;
+    data.push(parts);
+  }
+
+  // Map into target columns
+  // Build current column name list from headerCols -> original strings
+  const mapIdx = new Map(); // target -> source index
+  for (let j=0;j<headerCols.length;j++){
+    const t = headerCols[j];
+    if (t && !mapIdx.has(t)) mapIdx.set(t, j);
+  }
+
+  const rows = [];
+  let sr = 1;
+  for (const r of data){
+    const row = new Array(TARGET_COLUMNS.length).fill("");
+    for (let k=0;k<TARGET_COLUMNS.length;k++){
+      const col = TARGET_COLUMNS[k];
+      const idx = mapIdx.get(col);
+      row[k] = (idx!=null && r[idx]!=null) ? r[idx] : "";
+    }
+    // SR. NO.
+    row[0] = row[0] || String(sr++);
+    rows.push(row);
+  }
+  return rows;
+}
+
+// Build summary sheets
+function buildSummaries(rows){
+  // rows: array of arrays in TARGET_COLUMNS order, with header not included
+  // Convert into objects for easier grouping
+  const idx = Object.fromEntries(TARGET_COLUMNS.map((c,i)=>[c,i]));
+  const objs = rows.map(r => ({
+    code: r[idx["INFORMATION CODE"]],
+    src: r[idx["INFORMATION SOURCE"]],
+    amt: parseNumber(r[idx["AMOUNT PAID/CREDITED"]]),
+    tds: parseNumber(r[idx["TDS DEDUCTED"]]),
+    date: parseDateMaybe(r[idx["DATE OF PAYMENT/CREDIT"]])
+  }));
+
+  const sum = (arr, sel)=> arr.reduce((a,b)=> a + (sel(b)||0), 0);
+
+  // By Code
+  const byCodeMap = groupBy(objs, o=>o.code||"");
+  const byCode = [["INFORMATION CODE","AMOUNT PAID/CREDITED","TDS DEDUCTED"]];
+  for (const [k, arr] of byCodeMap.entries()){
+    byCode.push([k, sum(arr, x=>x.amt), sum(arr, x=>x.tds)]);
+  }
+
+  // By Source
+  const bySrcMap = groupBy(objs, o=>o.src||"");
+  const bySrc = [["INFORMATION SOURCE","AMOUNT PAID/CREDITED","TDS DEDUCTED"]];
+  for (const [k, arr] of bySrcMap.entries()){
+    bySrc.push([k, sum(arr, x=>x.amt), sum(arr, x=>x.tds)]);
+  }
+
+  // By Month (YYYY-MM)
+  const byMonthMap = groupBy(objs.filter(o=>o.date), o=>(String(o.date).slice(0,7)));
+  const byMonth = [["MONTH","AMOUNT PAID/CREDITED","TDS DEDUCTED"]];
+  for (const [k, arr] of byMonthMap.entries()){
+    byMonth.push([k, sum(arr, x=>x.amt), sum(arr, x=>x.tds)]);
+  }
+
+  // Summary
+  const totalAmt = sum(objs, x=>x.amt);
+  const totalTds = sum(objs, x=>x.tds);
+  const summary = [["Metric","Value"],["Total Amount", totalAmt],["Total TDS", totalTds],["Entries", rows.length]];
+
+  return { byCode, bySrc, byMonth, summary };
+}
+
+// ---------- Orchestrate ----------
+function setStatus(msg, isError=false){
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.className = "msg " + (isError ? "error" : "ok");
+}
+
+document.getElementById("btnConvert").addEventListener("click", async ()=>{
+  const file = document.getElementById("pdfFile").files?.[0];
+  const password = (document.getElementById("password").value||"").trim();
+  if (!file){ setStatus("Please choose an AIS/TIS PDF.", true); return; }
+  if (!password){ setStatus("Enter the PDF password (lowercase PAN + DDMMYYYY).", true); return; }
+
+  setStatus("Reading PDF...");
+
+  try {
+    const buf = await file.arrayBuffer();
+    const lines = await readPdfTextLines(buf, password);
+    setStatus("Parsing tables...");
+    const tableRows = linesToTable(lines); // without header
+    if (!tableRows.length) throw new Error("No table rows found.");
+
+    // Build workbook
+    const wb = XLSX.utils.book_new();
+    const header = [TARGET_COLUMNS];
+    const dataSheet = header.concat(tableRows);
+    const [name1, ws1] = toSheet("Extracted Data", dataSheet);
+    XLSX.utils.book_append_sheet(wb, ws1, name1);
+
+    const { byCode, bySrc, byMonth, summary } = buildSummaries(tableRows);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), "Summary");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(byCode), "By Code");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(bySrc), "By Source");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(byMonth), "By Month");
+
+    setStatus("Preparing Excel...");
+    XLSX.writeFile(wb, "AIS_TIS_Extract.xlsx");
+    setStatus("Excel downloaded.", false);
+  } catch (err){
+    console.error(err);
+    setStatus(err.message || String(err), true);
+  }
+});
+</script>
 </body>
 </html>
