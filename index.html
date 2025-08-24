@@ -234,7 +234,7 @@
     <div class="container">
         <div class="header">
             <h1>🏛️ AIS/TIS Converter</h1>
-            <p>Convert Income Tax AIS/TIS PDFs to Excel with Summary</p>
+            <p>Convert Income Tax AIS/TIS PDFs to Excel with Original Format + Summary</p>
         </div>
         
         <div class="form-section">
@@ -294,13 +294,13 @@
                 </div>
                 <div class="feature">
                     <div class="feature-icon">📊</div>
-                    <h3>Excel Output</h3>
-                    <p>Converts to structured Excel with summary sheet</p>
+                    <h3>Original + Summary</h3>
+                    <p>Preserves original format plus adds summary analysis</p>
                 </div>
                 <div class="feature">
                     <div class="feature-icon">🚀</div>
-                    <h3>Fast Processing</h3>
-                    <p>Quick and efficient PDF to Excel conversion</p>
+                    <h3>Table Structure</h3>
+                    <p>Maintains headers, columns, and row structure</p>
                 </div>
             </div>
         </div>
@@ -425,7 +425,7 @@
                 
                 const pdf = await loadingTask.promise;
                 
-                updateProgress(50, 'Extracting text from PDF...');
+                updateProgress(50, 'Extracting data from PDF...');
                 
                 const extractedData = await extractDataFromPdf(pdf);
                 
@@ -457,191 +457,121 @@
             const numPages = pdf.numPages;
             let extractedData = {
                 pages: [],
-                tables: [],
-                summary: {
-                    totalPages: numPages,
-                    extractedText: '',
-                    rawData: []
-                }
+                allText: '',
+                summary: {}
             };
             
             for (let pageNum = 1; pageNum <= numPages; pageNum++) {
                 const page = await pdf.getPage(pageNum);
                 const textContent = await page.getTextContent();
                 
-                // Extract text with positioning for table reconstruction
-                const textItems = textContent.items.map(item => ({
-                    text: item.str,
-                    x: item.transform[4],
-                    y: item.transform[5],
-                    width: item.width,
-                    height: item.height,
-                    fontName: item.fontName
-                }));
+                // Extract text with simple line-by-line approach
+                let pageText = '';
+                let currentLine = '';
+                let lastY = null;
                 
-                // Group text items by approximate Y position (rows)
-                const rows = groupTextIntoRows(textItems);
+                textContent.items.forEach(item => {
+                    // If Y position changed significantly, it's a new line
+                    if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+                        if (currentLine.trim()) {
+                            pageText += currentLine.trim() + '\n';
+                        }
+                        currentLine = item.str;
+                    } else {
+                        currentLine += item.str;
+                    }
+                    lastY = item.transform[5];
+                });
                 
-                // Convert rows into table format
-                const tableData = convertRowsToTable(rows);
+                // Add the last line
+                if (currentLine.trim()) {
+                    pageText += currentLine.trim() + '\n';
+                }
+                
+                // Split into lines and create simple table structure
+                const lines = pageText.split('\n').filter(line => line.trim());
+                const tableRows = [];
+                
+                lines.forEach(line => {
+                    // Split line by multiple spaces (likely column separators)
+                    const columns = line.split(/\s{3,}/).map(col => col.trim()).filter(col => col);
+                    if (columns.length > 1) {
+                        tableRows.push(columns);
+                    } else if (line.trim()) {
+                        // Single column or header
+                        tableRows.push([line.trim()]);
+                    }
+                });
                 
                 extractedData.pages.push({
                     pageNumber: pageNum,
-                    textItems: textItems,
-                    tableData: tableData,
-                    rawText: textItems.map(item => item.text).join(' ')
+                    text: pageText,
+                    tableRows: tableRows,
+                    lines: lines
                 });
                 
-                extractedData.summary.extractedText += textItems.map(item => item.text).join(' ') + '\n\n';
+                extractedData.allText += pageText + '\n\n';
                 
-                updateProgress(50 + (pageNum / numPages) * 25, `Processing page ${pageNum} of ${numPages}...`);
+                updateProgress(50 + (pageNum / numPages) * 25, `Extracting page ${pageNum} of ${numPages}...`);
             }
             
-            // Parse summary data for the additional summary sheet
-            extractedData.summary = parseAISSummary(extractedData);
+            // Create summary
+            extractedData.summary = createSummary(extractedData.allText);
             
             return extractedData;
         }
         
-        function groupTextIntoRows(textItems) {
-            // Sort by Y position (top to bottom)
-            textItems.sort((a, b) => b.y - a.y);
-            
-            const rows = [];
-            const tolerance = 5; // Y position tolerance for same row
-            
-            textItems.forEach(item => {
-                if (item.text.trim()) {
-                    let foundRow = false;
-                    
-                    for (let row of rows) {
-                        if (Math.abs(row.y - item.y) <= tolerance) {
-                            row.items.push(item);
-                            foundRow = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!foundRow) {
-                        rows.push({
-                            y: item.y,
-                            items: [item]
-                        });
-                    }
-                }
-            });
-            
-            // Sort items within each row by X position (left to right)
-            rows.forEach(row => {
-                row.items.sort((a, b) => a.x - b.x);
-            });
-            
-            return rows;
-        }
-        
-        function convertRowsToTable(rows) {
-            const tableData = [];
-            
-            rows.forEach(row => {
-                const rowData = [];
-                let currentText = '';
-                let lastX = -1;
-                const columnThreshold = 50; // Minimum gap between columns
-                
-                row.items.forEach(item => {
-                    if (lastX !== -1 && item.x - lastX > columnThreshold && currentText.trim()) {
-                        rowData.push(currentText.trim());
-                        currentText = item.text;
-                    } else {
-                        if (currentText) currentText += ' ';
-                        currentText += item.text;
-                    }
-                    lastX = item.x + item.width;
-                });
-                
-                if (currentText.trim()) {
-                    rowData.push(currentText.trim());
-                }
-                
-                if (rowData.length > 0) {
-                    tableData.push(rowData);
-                }
-            });
-            
-            return tableData;
-        }
-        
-        function parseAISSummary(extractedData) {
-            const allText = extractedData.summary.extractedText;
+        function createSummary(allText) {
             const summary = {
                 taxpayerInfo: {},
-                incomeSummary: {},
-                tdsSummary: {},
-                refundSummary: {},
-                deductionSummary: {},
-                totalPages: extractedData.totalPages,
-                totalTables: 0,
-                allAmounts: [],
-                keyFinancials: {}
+                amounts: [],
+                keyStats: {}
             };
             
-            // Extract basic taxpayer info
+            // Extract PAN
             const panMatch = allText.match(/(?:PAN|Permanent Account Number)[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i);
             if (panMatch) summary.taxpayerInfo.pan = panMatch[1];
             
-            const nameMatch = allText.match(/(?:Name|Taxpayer Name)[:\s]*([A-Z][A-Z\s]{5,50}?)(?:\s(?:PAN|DOB|Address|Father))/i);
+            // Extract Name
+            const nameMatch = allText.match(/(?:Name)[:\s]*([A-Z][A-Z\s]{5,50}?)(?:\s(?:PAN|DOB|Address|Father))/i);
             if (nameMatch) summary.taxpayerInfo.name = nameMatch[1].trim();
             
+            // Extract Financial Year
             const fyMatch = allText.match(/(?:Financial Year|FY|Assessment Year|AY)[:\s]*(\d{4}-\d{2,4})/i);
             if (fyMatch) summary.taxpayerInfo.financialYear = fyMatch[1];
             
+            // Extract DOB
             const dobMatch = allText.match(/(?:DOB|Date of Birth)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
             if (dobMatch) summary.taxpayerInfo.dob = dobMatch[1];
             
-            // Extract all amounts with better patterns
-            const amountPatterns = [
-                /(?:Rs\.?|INR|₹)\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
-                /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)\s*(?:Rs\.?|INR|₹)/gi,
-                /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g
-            ];
+            // Extract all amounts
+            const amountPattern = /(?:Rs\.?|INR|₹)?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi;
+            const amounts = [...allText.matchAll(amountPattern)];
             
-            const foundAmounts = new Set();
-            amountPatterns.forEach(pattern => {
-                const matches = [...allText.matchAll(pattern)];
-                matches.forEach(match => {
-                    const amount = match[1];
-                    const numValue = parseFloat(amount.replace(/,/g, ''));
-                    if (numValue >= 100) { // Filter out small numbers that aren't amounts
-                        foundAmounts.add(amount);
-                    }
-                });
+            amounts.forEach(match => {
+                const amount = match[1];
+                const numValue = parseFloat(amount.replace(/,/g, ''));
+                if (numValue >= 100) { // Filter out small numbers
+                    summary.amounts.push({
+                        display: amount,
+                        numeric: numValue
+                    });
+                }
             });
             
-            summary.allAmounts = Array.from(foundAmounts).sort((a, b) => {
-                return parseFloat(b.replace(/,/g, '')) - parseFloat(a.replace(/,/g, ''));
-            });
+            // Sort amounts by value (highest first)
+            summary.amounts.sort((a, b) => b.numeric - a.numeric);
             
-            // Calculate key financials
-            if (summary.allAmounts.length > 0) {
-                const amounts = summary.allAmounts.map(a => parseFloat(a.replace(/,/g, '')));
-                summary.keyFinancials.totalAmounts = amounts.length;
-                summary.keyFinancials.highestAmount = Math.max(...amounts).toLocaleString('en-IN');
-                summary.keyFinancials.lowestAmount = Math.min(...amounts).toLocaleString('en-IN');
-                summary.keyFinancials.averageAmount = (amounts.reduce((a, b) => a + b, 0) / amounts.length).toLocaleString('en-IN');
-                summary.keyFinancials.totalSum = amounts.reduce((a, b) => a + b, 0).toLocaleString('en-IN');
-            }
-            
-            // Count tables found
-            summary.totalTables = extractedData.pages.reduce((count, page) => count + page.tableData.length, 0);
-            
-            return summary;
-        }
-        
-        function parseAISData(text) {
-            // This function is now replaced by parseAISSummary but keeping for compatibility
-            return parseAISSummary({ summary: { extractedText: text }, pages: [], totalPages: 0 });
-        }AmountNumbers.length;
-                summary.taxSummary.sumOfAllAmounts = allAmountNumbers.reduce((a, b) => a + b, 0).toLocaleString('en-IN');
+            // Calculate statistics
+            if (summary.amounts.length > 0) {
+                const values = summary.amounts.map(a => a.numeric);
+                summary.keyStats = {
+                    totalAmounts: values.length,
+                    highest: Math.max(...values),
+                    lowest: Math.min(...values),
+                    average: values.reduce((a, b) => a + b, 0) / values.length,
+                    total: values.reduce((a, b) => a + b, 0)
+                };
             }
             
             return summary;
@@ -650,117 +580,124 @@
         async function createExcelFile(data) {
             const workbook = XLSX.utils.book_new();
             
-            // Create Summary Sheet (NEW)
+            // 1. Create Summary Sheet
             const summaryData = [
                 ['AIS/TIS SUMMARY REPORT'],
                 ['Generated on:', new Date().toLocaleString()],
                 [''],
-                ['TAXPAYER INFORMATION'],
-                ['PAN', data.summary.taxpayerInfo.pan || 'Not Available'],
-                ['Name', data.summary.taxpayerInfo.name || 'Not Available'],
-                ['Financial Year', data.summary.taxpayerInfo.financialYear || 'Not Available'],
-                ['Date of Birth', data.summary.taxpayerInfo.dob || 'Not Available'],
+                ['=== TAXPAYER INFORMATION ==='],
+                ['PAN Number', data.summary.taxpayerInfo.pan || 'Not Found'],
+                ['Name', data.summary.taxpayerInfo.name || 'Not Found'],
+                ['Financial Year', data.summary.taxpayerInfo.financialYear || 'Not Found'],
+                ['Date of Birth', data.summary.taxpayerInfo.dob || 'Not Found'],
                 [''],
-                ['DOCUMENT SUMMARY'],
-                ['Total Pages', data.summary.totalPages],
-                ['Total Tables Found', data.summary.totalTables],
+                ['=== DOCUMENT SUMMARY ==='],
+                ['Total Pages', data.pages.length],
                 ['Processing Date', new Date().toLocaleDateString()],
+                ['Processing Time', new Date().toLocaleTimeString()],
                 [''],
-                ['FINANCIAL SUMMARY'],
-                ['Total Amounts Found', data.summary.keyFinancials.totalAmounts || 0],
-                ['Highest Amount (Rs.)', data.summary.keyFinancials.highestAmount || '0'],
-                ['Lowest Amount (Rs.)', data.summary.keyFinancials.lowestAmount || '0'],
-                ['Average Amount (Rs.)', data.summary.keyFinancials.averageAmount || '0'],
-                ['Total Sum (Rs.)', data.summary.keyFinancials.totalSum || '0'],
-                [''],
-                ['ALL AMOUNTS FOUND'],
-                ['Sr.No.', 'Amount (Rs.)', 'Numeric Value']
+                ['=== FINANCIAL SUMMARY ===']
             ];
             
-            // Add all amounts to summary
-            if (data.summary.allAmounts && data.summary.allAmounts.length > 0) {
-                data.summary.allAmounts.forEach((amount, index) => {
-                    summaryData.push([
-                        index + 1, 
-                        amount, 
-                        parseFloat(amount.replace(/,/g, ''))
-                    ]);
-                });
+            if (data.summary.keyStats.totalAmounts > 0) {
+                summaryData.push(
+                    ['Total Amounts Found', data.summary.keyStats.totalAmounts],
+                    ['Highest Amount (Rs.)', data.summary.keyStats.highest.toLocaleString('en-IN')],
+                    ['Lowest Amount (Rs.)', data.summary.keyStats.lowest.toLocaleString('en-IN')],
+                    ['Average Amount (Rs.)', Math.round(data.summary.keyStats.average).toLocaleString('en-IN')],
+                    ['Total Sum (Rs.)', data.summary.keyStats.total.toLocaleString('en-IN')]
+                );
             } else {
-                summaryData.push(['No amounts found', '', '']);
+                summaryData.push(['No amounts found', '']);
+            }
+            
+            summaryData.push([''], ['=== ALL AMOUNTS FOUND ==='], ['Sr.No.', 'Amount (Rs.)', 'Numeric Value']);
+            
+            // Add all amounts
+            if (data.summary.amounts.length > 0) {
+                data.summary.amounts.forEach((amount, index) => {
+                    summaryData.push([index + 1, amount.display, amount.numeric]);
+                });
             }
             
             const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
-            
-            // Style the summary sheet
-            summarySheet['!cols'] = [
-                { width: 25 },
-                { width: 20 },
-                { width: 15 }
-            ];
-            
+            summarySheet['!cols'] = [{ width: 25 }, { width: 20 }, { width: 15 }];
             XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
             
-            // Create sheets for each page maintaining original table structure
-            data.pages.forEach((page, pageIndex) => {
-                let sheetData = [];
+            // 2. Create Individual Page Sheets (Original Format)
+            data.pages.forEach(page => {
+                const pageData = [
+                    [`PAGE ${page.pageNumber} - ORIGINAL FORMAT`],
+                    [''],
+                    ['=== RAW DATA AS EXTRACTED ===']
+                ];
                 
-                // Add page header
-                sheetData.push([`PAGE ${page.pageNumber} - ORIGINAL DATA`]);
-                sheetData.push(['']);
-                
-                if (page.tableData && page.tableData.length > 0) {
-                    // Add the table data as-is (preserving original structure)
-                    page.tableData.forEach(row => {
-                        // Ensure all rows have same number of columns
-                        const maxCols = Math.max(...page.tableData.map(r => r.length));
-                        while (row.length < maxCols) {
-                            row.push('');
-                        }
-                        sheetData.push(row);
+                // Add table rows if available
+                if (page.tableRows && page.tableRows.length > 0) {
+                    page.tableRows.forEach(row => {
+                        pageData.push(row);
                     });
                 } else {
-                    // If no structured table found, add raw text
-                    sheetData.push(['Raw Text Content:']);
-                    sheetData.push([page.rawText]);
+                    // Fallback to lines
+                    page.lines.forEach(line => {
+                        if (line.trim()) {
+                            pageData.push([line]);
+                        }
+                    });
                 }
                 
-                const pageSheet = XLSX.utils.aoa_to_sheet(sheetData);
+                const pageSheet = XLSX.utils.aoa_to_sheet(pageData);
                 
                 // Auto-size columns
-                if (page.tableData && page.tableData.length > 0) {
-                    const maxCols = Math.max(...page.tableData.map(r => r.length));
-                    pageSheet['!cols'] = Array(maxCols).fill().map(() => ({ width: 15 }));
-                }
+                const maxCols = Math.max(...pageData.map(row => row.length));
+                pageSheet['!cols'] = Array(maxCols).fill().map(() => ({ width: 15 }));
                 
                 XLSX.utils.book_append_sheet(workbook, pageSheet, `Page_${page.pageNumber}`);
             });
             
-            // Create a combined data sheet with all tables
-            let combinedData = [
-                ['COMBINED AIS/TIS DATA'],
-                ['All tables from all pages combined'],
+            // 3. Create Combined Data Sheet
+            const combinedData = [
+                ['ALL PAGES COMBINED DATA'],
+                [''],
+                ['=== COMPLETE AIS/TIS DOCUMENT ==='],
                 ['']
             ];
             
             data.pages.forEach(page => {
                 combinedData.push([`--- PAGE ${page.pageNumber} ---`]);
-                if (page.tableData && page.tableData.length > 0) {
-                    page.tableData.forEach(row => {
+                
+                if (page.tableRows && page.tableRows.length > 0) {
+                    page.tableRows.forEach(row => {
                         combinedData.push(row);
                     });
+                } else {
+                    page.lines.forEach(line => {
+                        if (line.trim()) {
+                            combinedData.push([line]);
+                        }
+                    });
                 }
-                combinedData.push(['']); // Empty row between pages
+                combinedData.push(['']); // Space between pages
             });
             
             const combinedSheet = XLSX.utils.aoa_to_sheet(combinedData);
-            combinedSheet['!cols'] = Array(20).fill().map(() => ({ width: 12 }));
-            XLSX.utils.book_append_sheet(workbook, combinedSheet, 'All_Data_Combined');
+            combinedSheet['!cols'] = Array(10).fill().map(() => ({ width: 12 }));
+            XLSX.utils.book_append_sheet(workbook, combinedSheet, 'All_Pages_Combined');
             
-            // Generate filename with current date
+            // 4. Create Raw Text Sheet (for reference)
+            const rawTextData = [
+                ['RAW TEXT EXTRACTION'],
+                ['Complete text content from all pages'],
+                [''],
+                [data.allText]
+            ];
+            
+            const rawSheet = XLSX.utils.aoa_to_sheet(rawTextData);
+            rawSheet['!cols'] = [{ width: 100 }];
+            XLSX.utils.book_append_sheet(workbook, rawSheet, 'Raw_Text');
+            
+            // Generate and save file
             const fileName = `AIS_TIS_${data.summary.taxpayerInfo.pan || 'Export'}_${new Date().toISOString().split('T')[0]}.xlsx`;
-            
-            // Save the file
             XLSX.writeFile(workbook, fileName);
         }
         
