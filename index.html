@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AIS + TIS PDF → Excel (Single File)</title>
+  <title>AIS + TIS PDF → Excel (v2)</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
@@ -20,30 +20,23 @@
     }
     .row { display:flex; gap:12px; align-items:center; margin-top: 16px; flex-wrap: wrap; }
     button { background:var(--primary); color:#fff; border:none; padding:10px 16px; border-radius:12px; cursor:pointer; }
-    button.secondary { background:#e5e7eb; color:#111; }
     .msg { font-size:14px; }
     .msg.error { color:crimson; }
     .msg.ok { color:green; }
-    details { margin-top: 14px; }
-    table { border-collapse: collapse; font-size: 14px; }
-    th, td { border: 1px solid #ddd; padding: 8px; }
-    th { background: #f2f2f2; }
     footer { margin-top:16px; color:#777; font-size:12px; }
-    .hint { color:#666; font-size:12px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>AIS + TIS PDF → Excel Converter</h1>
-      <p class="lead">Upload your password-protected PDF (password = <b>lowercase PAN + DDMMYYYY</b>). The tool auto-detects AIS or TIS, flattens details, and exports Excel with a Summary sheet.</p>
+      <h1>AIS + TIS PDF → Excel Converter (v2)</h1>
+      <p class="lead">Password = <b>lowercase PAN + DDMMYYYY</b>. The app auto-detects AIS/TIS, flattens AIS detail rows, and exports to Excel with a Summary sheet.</p>
 
       <div class="grid">
         <div>
           <label>PDF file</label><br>
           <input id="pdfFile" type="file" accept="application/pdf">
-          <div class="hint">Works for text-based PDFs (not scanned images).</div>
         </div>
         <div>
           <label>Password</label><br>
@@ -56,20 +49,12 @@
         <span id="status" class="msg"></span>
       </div>
 
-      <details>
-        <summary>Excel output</summary>
-        <div style="padding-top:8px;overflow:auto">
-          <p><b>AIS sheet (flattened):</b> SR. NO. | INFORMATION CODE | INFORMATION DESCRIPTION | INFORMATION SOURCE | DATE OF PAYMENT/CREDIT | AMOUNT PAID/CREDITED | TDS DEDUCTED</p>
-          <p><b>TIS sheet:</b> SR. NO. | PART | INFORMATION DESCRIPTION | INFORMATION SOURCE | AMOUNT DESCRIPTION | REPORTED BY SOURCE | PROCESSED BY SYSTEM | ACCEPTED BY TAXPAYER/CONFIRMED BY SOURCE</p>
-        </div>
-      </details>
-
       <footer>All processing happens in your browser. No data is uploaded to any server.</footer>
     </div>
   </div>
 
 <script>
-// ---------- Helpers ----------
+// ---------- Constants ----------
 const AIS_COLUMNS = [
   "SR. NO.",
   "INFORMATION CODE",
@@ -91,6 +76,7 @@ const TIS_COLUMNS = [
   "ACCEPTED BY TAXPAYER/CONFIRMED BY SOURCE"
 ];
 
+// ---------- Utils ----------
 function isAmountLike(s){
   if (!s) return false;
   s = String(s).trim();
@@ -129,12 +115,12 @@ function splitByGaps(lineItems, gap=24){
   let bucket = [];
   for (let i=0;i<lineItems.length;i++){
     const t = lineItems[i];
-    bucket.push(t.str.trim());
+    if (t.str && t.str.trim()) bucket.push(t.str.trim());
     const next = lineItems[i+1];
     if (!next) break;
     const g = next.x - (t.x + t.w);
     if (g > gap){
-      parts.push(bucket.join(" ").trim());
+      if (bucket.length) parts.push(bucket.join(" ").trim());
       bucket = [];
     }
   }
@@ -144,71 +130,84 @@ function splitByGaps(lineItems, gap=24){
 
 function joinText(items){ return items.map(t=>t.str).join(" ").trim(); }
 
-// ---------- Detect document type ----------
 function detectType(allText){
   const t = allText.toLowerCase();
-  // Strong TIS markers
   if (t.includes("taxpayer information summary") ||
-      (t.includes("information category") && t.includes("reported by source") && t.includes("processed by system"))){
-    return "TIS";
-  }
-  // AIS markers
+      (t.includes("information category") && t.includes("reported by source") && t.includes("processed by system"))) return "TIS";
   if (t.includes("annual information statement") ||
-      (t.includes("information code") && t.includes("information description") && t.includes("information source"))){
-    return "AIS";
-  }
-  // default: try AIS first
+      (t.includes("information code") && t.includes("information description") && t.includes("information source"))) return "AIS";
   return "AIS";
 }
 
-// ---------- Parse AIS (flatten details) ----------
+// ---------- AIS Parser (with context capture) ----------
+function looksLikeInfoCode(s){
+  return /^(?:TDS|TCS|SFT)\s*[-/ ]?\s*\d+/i.test(s) || /^[A-Z]{3}-\d+$/i.test(s);
+}
+
 function parseAIS(pages){
   const rows = [];
   let sr=1;
   let context = { code:"", desc:"", source:"" };
+  let inDetail = false;
 
   for (const items of pages){
-    // Group lines
     const lines = groupByY(items).map(line=> line.sort((a,b)=> a.x-b.x));
+
     for (const line of lines){
-      const text = joinText(line).toLowerCase();
+      const txt = joinText(line);
+      const low = txt.toLowerCase();
+      const parts = splitByGaps(line, 28);
 
-      // Capture header context (Information Code/Description/Source lines)
-      if (text.includes("information code")){
-        // next lines will contain code/desc/source in separate cells; split by gaps
-        const parts = splitByGaps(line);
-        // Expect structure like: [INFORMATION CODE, <code>] [INFORMATION DESCRIPTION, <desc>] [INFORMATION SOURCE, <source> ...]
-        // So store labels to extract next meaningful tokens on subsequent lines.
-        continue;
+      // skip label header rows
+      if (low.includes("sr. no.") && low.includes("information code") && low.includes("information description")) { inDetail=false; continue; }
+      if (low.includes("quarter") && low.includes("date of payment/credit")) { inDetail=true; continue; }
+
+      // Capture the header "values" row with code/desc/source
+      if (!inDetail){
+        let tokens = parts.slice();
+        if (tokens.length){
+          if (/^\d+$/.test(tokens[0])) tokens.shift(); // drop serial number cell
+        }
+        if (tokens.length >= 2 && looksLikeInfoCode(tokens[0])){
+          // Typical: [TDS-194] [Dividend received (Section 194)] [UJJIVAN SMALL ... (...)] [COUNT] [AMOUNT]
+          context.code = tokens[0];
+          context.desc = tokens[1] || context.desc;
+          // pick the next non-label token as source
+          context.source = "";
+          for (let i=2;i<tokens.length;i++){
+            const t = tokens[i];
+            if (/^count$/i.test(t) || /^amount$/i.test(t)) break;
+            context.source = t;
+            break;
+          }
+          continue;
+        }
+
+        // Sometimes description/source may be on their own lines after labels; capture them if seen
+        if (!context.desc && /section\s*\d+/i.test(low)) { context.desc = txt.trim(); continue; }
+        if (!context.source && /\([A-Z0-9]+\)$/i.test(txt.trim())) { context.source = txt.trim(); continue; }
       }
 
-      // Read specific value lines where values appear under each header cell.
-      // Heuristic: when a line contains TDS- or SFT- like code, treat as code/desc/source line
-      const parts = splitByGaps(line);
-      if (parts.length >= 3 && (/^(t[dcs]|sft)/i.test(parts[0]) || parts[0].match(/^\w{3}-\d+/i))) {
-        context.code = parts[0];
-        context.desc = parts[1] || context.desc;
-        context.source = parts[2] || context.source;
-        continue;
-      }
+      // Detail data rows (inside the "Quarter/Date/Amount/TDS..." table)
+      if (inDetail){
+        const dateRe = /\b\d{2}[-/]\d{2}[-/]\d{4}\b|\b\d{2}\s+[A-Za-z]{3}\s+\d{4}\b/;
+        const hasDate = dateRe.test(txt);
+        if (!hasDate) continue;
 
-      // Detail header row (Quarter / Date / Amount / TDS)
-      const isDetailHeader = /quarter/i.test(text) && /date of payment\/credit/i.test(text);
-      if (isDetailHeader) { continue; }
+        // Find amounts in left-to-right order (Amount Paid/Credited, TDS Deducted, optionally TDS Deposited)
+        const numericTokens = line.filter(t=> isAmountLike(t.str)).sort((a,b)=> a.x - b.x);
+        if (!numericTokens.length) continue;
 
-      // Detail data row: should have a date and at least one amount-like token
-      const hasDate = /\b\d{2}[-/]\d{2}[-/]\d{4}\b|\b\d{2}\s+[A-Za-z]{3}\s+\d{4}\b/.test(joinText(line));
-      const amountCandidates = line.filter(t=> isAmountLike(t.str)).sort((a,b)=> a.x-b.x);
+        const amtTok = numericTokens[0] || null;
+        const tdsTok = numericTokens[1] || null;
 
-      if (hasDate && amountCandidates.length){
-        const tdsTok = amountCandidates[amountCandidates.length-1];
-        const amtTok = amountCandidates.length>=2 ? amountCandidates[amountCandidates.length-2] : null;
-        // extract date from parts (prefer token matching dd/mm/yyyy or dd Mon yyyy)
+        // Pull date string from parts left of numeric columns
         let dateStr = "";
         for (const p of parts){
-          const m = p.match(/\b\d{2}[-/]\d{2}[-/]\d{4}\b|\b\d{2}\s+[A-Za-z]{3}\s+\d{4}\b/);
+          const m = p.match(dateRe);
           if (m){ dateStr = m[0]; break; }
         }
+
         const row = new Array(AIS_COLUMNS.length).fill("");
         row[0] = String(sr++);
         row[1] = context.code;
@@ -224,7 +223,7 @@ function parseAIS(pages){
   return rows;
 }
 
-// ---------- Parse TIS ----------
+// ---------- TIS Parser ----------
 function parseTIS(pages){
   const rows = [];
   let sr = 1;
@@ -233,52 +232,48 @@ function parseTIS(pages){
     for (const line of lines){
       const txt = joinText(line);
       const low = txt.toLowerCase();
-      // skip big headers
-      if (low.includes("information category") || low.includes("processed by system") && !/\d/.test(low)) continue;
-      // detail header row
+      if (low.includes("information category") || (low.includes("processed by system") && !/\d/.test(low))) continue;
       if (low.includes("part") && low.includes("information description") && low.includes("reported by source")) continue;
-
       const parts = splitByGaps(line, 22);
       if (parts.length < 5) continue;
 
-      // Identify last three numeric-like columns -> reported, processed, accepted
+      // Gather indices of numeric-looking amounts
       const numIdx = [];
       for (let i=0;i<parts.length;i++){
         if (isAmountLike(parts[i])) numIdx.push(i);
       }
-      if (numIdx.length >= 1){
-        const accepted = parts[numIdx[numIdx.length-1]];
-        const processed = numIdx.length>=2 ? parts[numIdx[numIdx.length-2]] : "";
-        const reported  = numIdx.length>=3 ? parts[numIdx[numIdx.length-3]] : "";
-        // everything before the first numeric is descriptive columns
-        const descParts = parts.slice(0, numIdx[0]);
-        // heuristic mapping: [SR, PART, DESC, SOURCE, AMOUNT DESC]
-        // SR may appear as standalone number at beginning
-        let srno = "", part="", desc="", source="", amountDesc="";
-        if (descParts.length >= 1){
-          const first = descParts[0];
-          if (/^\d+$/.test(first)) { srno = first; descParts.shift(); }
-        }
-        if (descParts.length >= 1){ part = descParts[0]; }
-        if (descParts.length >= 3){
-          desc = descParts[1];
-          source = descParts[2];
-          if (descParts.length >= 4) amountDesc = descParts[3];
-        } else if (descParts.length === 2){
-          desc = descParts[1];
-        }
+      if (numIdx.length < 1) continue;
 
-        const row = new Array(TIS_COLUMNS.length).fill("");
-        row[0] = srno || String(sr++);
-        row[1] = part;
-        row[2] = desc;
-        row[3] = source;
-        row[4] = amountDesc;
-        row[5] = toNumberOrText(cleanAmount(reported));
-        row[6] = toNumberOrText(cleanAmount(processed));
-        row[7] = toNumberOrText(cleanAmount(accepted));
-        rows.push(row);
+      const accepted = parts[numIdx[numIdx.length-1]];
+      const processed = numIdx.length>=2 ? parts[numIdx[numIdx.length-2]] : "";
+      const reported  = numIdx.length>=3 ? parts[numIdx[numIdx.length-3]] : "";
+      const descParts = parts.slice(0, numIdx[0]);
+
+      // SR NO at start
+      let srno = "", part="", desc="", source="", amountDesc="";
+      if (descParts.length >= 1 && /^\d+$/.test(descParts[0])) { srno = descParts.shift(); }
+      if (descParts.length >= 1){ part = descParts[0]; }
+      if (descParts.length >= 4){
+        desc = descParts[1];
+        source = descParts[2];
+        amountDesc = descParts[3];
+      } else if (descParts.length === 3){
+        desc = descParts[1];
+        source = descParts[2];
+      } else if (descParts.length === 2){
+        desc = descParts[1];
       }
+
+      const row = new Array(TIS_COLUMNS.length).fill("");
+      row[0] = srno || String(sr++);
+      row[1] = part;
+      row[2] = desc;
+      row[3] = source;
+      row[4] = amountDesc;
+      row[5] = toNumberOrText(cleanAmount(reported));
+      row[6] = toNumberOrText(cleanAmount(processed));
+      row[7] = toNumberOrText(cleanAmount(accepted));
+      rows.push(row);
     }
   }
   return rows;
@@ -310,17 +305,8 @@ document.getElementById("btnConvert").addEventListener("click", async ()=>{
     }
 
     const type = detectType(allText);
-    let aisRows = [], tisRows = [];
-
-    if (type === "AIS"){
-      aisRows = parseAIS(pages);
-      // Some AIS files also include TIS-style summary; attempt parse too
-      tisRows = parseTIS(pages);
-    } else {
-      tisRows = parseTIS(pages);
-      // Sometimes TIS PDFs carry AIS-like sections
-      aisRows = parseAIS(pages);
-    }
+    let aisRows = parseAIS(pages);
+    let tisRows = parseTIS(pages);
 
     if (!aisRows.length && !tisRows.length){
       status.textContent = "Could not find AIS or TIS tables. Try another file."; status.classList.add("error"); return;
