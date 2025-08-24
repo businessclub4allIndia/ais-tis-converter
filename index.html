@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -46,21 +47,30 @@
           for (let i = 1; i <= pdf.numPages; i++) {
             const page = await pdf.getPage(i);
             const textContent = await page.getTextContent();
-            const pageText = textContent.items.map(item => item.str).join(" ");
 
-            // Simple row splitting logic (needs adjustments for real AIS/TIS PDFs)
-            const rows = pageText.split("\n");
-            rows.forEach(row => {
-              const cols = row.split(/\s{2,}/); // split by spaces
-              if (cols.length >= 6) {
+            // Group words into lines by Y coordinate
+            let lines = {};
+            textContent.items.forEach(item => {
+              let y = Math.round(item.transform[5]); // vertical position
+              if (!lines[y]) lines[y] = [];
+              lines[y].push(item);
+            });
+
+            // Process each line into columns
+            Object.values(lines).forEach(lineItems => {
+              lineItems.sort((a, b) => a.transform[4] - b.transform[4]); // sort by X
+              const lineText = lineItems.map(it => it.str.trim()).filter(Boolean);
+
+              // Expect at least 6 columns for valid data
+              if (lineText.length >= 6) {
                 extractedRows.push([
                   srNo++,
-                  cols[0] || "",
-                  cols[1] || "",
-                  cols[2] || "",
-                  cols[3] || "",
-                  cols[4] || "",
-                  cols[5] || ""
+                  lineText[0] || "",
+                  lineText[1] || "",
+                  lineText[2] || "",
+                  lineText[3] || "",
+                  lineText[4] || "",
+                  lineText[5] || ""
                 ]);
               }
             });
@@ -78,8 +88,8 @@
           let summary = {};
           extractedRows.forEach(r => {
             let code = r[1];
-            let amt = parseFloat(r[5]) || 0;
-            let tds = parseFloat(r[6]) || 0;
+            let amt = parseFloat(r[5].replace(/,/g,"")) || 0;
+            let tds = parseFloat(r[6].replace(/,/g,"")) || 0;
             if (!summary[code]) summary[code] = { amt: 0, tds: 0 };
             summary[code].amt += amt;
             summary[code].tds += tds;
