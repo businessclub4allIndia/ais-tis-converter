@@ -499,45 +499,166 @@
                 incomeDetails: [],
                 deductions: [],
                 taxes: [],
-                refunds: []
+                refunds: [],
+                rawAmounts: [],
+                tdsSummary: [],
+                salaryDetails: [],
+                interestDetails: [],
+                capitalGains: [],
+                otherIncomes: []
             };
             
-            // Extract taxpayer information
-            const panMatch = text.match(/PAN[:\s]+([A-Z]{5}[0-9]{4}[A-Z]{1})/i);
-            if (panMatch) summary.taxpayerInfo.pan = panMatch[1];
+            // Clean text for better parsing
+            const cleanText = text.replace(/\s+/g, ' ').trim();
             
-            const nameMatch = text.match(/Name[:\s]+([A-Z\s]+)/i);
-            if (nameMatch) summary.taxpayerInfo.name = nameMatch[1].trim();
+            // Extract taxpayer information with multiple patterns
+            const panPatterns = [
+                /PAN[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i,
+                /Permanent Account Number[:\s]*([A-Z]{5}[0-9]{4}[A-Z]{1})/i,
+                /([A-Z]{5}[0-9]{4}[A-Z]{1})/g
+            ];
             
-            // Extract financial year
-            const fyMatch = text.match(/Financial Year[:\s]+(\d{4}-\d{2}|\d{4}-\d{4})/i);
-            if (fyMatch) summary.taxpayerInfo.financialYear = fyMatch[1];
-            
-            // Extract amounts (simplified parsing)
-            const amountPattern = /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g;
-            const amounts = text.match(amountPattern) || [];
-            
-            if (amounts.length > 0) {
-                summary.taxSummary.totalIncome = amounts[0];
-                summary.taxSummary.totalTax = amounts[1] || '0';
-                summary.taxSummary.totalTDS = amounts[2] || '0';
+            for (let pattern of panPatterns) {
+                const match = cleanText.match(pattern);
+                if (match && match[1]) {
+                    summary.taxpayerInfo.pan = match[1];
+                    break;
+                }
             }
             
-            // Parse sections (simplified)
-            const sections = text.split(/(?:PART|SECTION|Chapter)/i);
-            sections.forEach((section, index) => {
-                if (section.includes('salary') || section.includes('Income')) {
-                    summary.incomeDetails.push({
-                        type: 'Salary/Income',
-                        details: section.substring(0, 200) + '...'
-                    });
-                } else if (section.includes('TDS') || section.includes('tax')) {
-                    summary.taxes.push({
-                        type: 'TDS/Tax',
-                        details: section.substring(0, 200) + '...'
-                    });
+            // Extract name with multiple patterns
+            const namePatterns = [
+                /Name[:\s]*([A-Z][A-Z\s]{2,50}?)(?:\s|PAN|DOB|Address)/i,
+                /Taxpayer Name[:\s]*([A-Z][A-Z\s]{2,50}?)(?:\s|PAN|DOB|Address)/i,
+                /([A-Z][A-Z\s]{10,50}?)(?:PAN|DOB)/i
+            ];
+            
+            for (let pattern of namePatterns) {
+                const match = cleanText.match(pattern);
+                if (match && match[1] && match[1].length > 5) {
+                    summary.taxpayerInfo.name = match[1].trim();
+                    break;
                 }
+            }
+            
+            // Extract financial year
+            const fyPatterns = [
+                /(?:Financial Year|FY|Assessment Year|AY)[:\s]*(\d{4}-\d{2,4})/i,
+                /(\d{4}-\d{2,4})/g
+            ];
+            
+            for (let pattern of fyPatterns) {
+                const match = cleanText.match(pattern);
+                if (match && match[1]) {
+                    summary.taxpayerInfo.financialYear = match[1];
+                    break;
+                }
+            }
+            
+            // Enhanced amount extraction with context
+            const amountPatterns = [
+                /Rs\.?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
+                /INR\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
+                /₹\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
+                /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)\s*(?:Rs|INR|₹)/gi,
+                /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g
+            ];
+            
+            let allAmounts = new Set();
+            for (let pattern of amountPatterns) {
+                const matches = [...cleanText.matchAll(pattern)];
+                matches.forEach(match => {
+                    if (match[1] && parseFloat(match[1].replace(/,/g, '')) > 100) {
+                        allAmounts.add(match[1]);
+                    }
+                });
+            }
+            
+            summary.rawAmounts = Array.from(allAmounts);
+            
+            // Parse salary information
+            const salarySection = cleanText.match(/(?:salary|employment|employer).*?(?=(?:interest|dividend|capital|business|profession|other|refund)|$)/gis);
+            if (salarySection) {
+                salarySection.forEach(section => {
+                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
+                    const employer = section.match(/employer[:\s]*([A-Z][A-Z\s&.,]{5,50}?)(?:\s|TAN|PAN|Address)/i);
+                    
+                    summary.salaryDetails.push({
+                        employer: employer ? employer[1].trim() : 'Not specified',
+                        section: section.substring(0, 300),
+                        amounts: amounts.map(m => m[1])
+                    });
+                });
+            }
+            
+            // Parse TDS information
+            const tdsPatterns = [
+                /TDS[:\s]*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
+                /Tax Deducted at Source[:\s]*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,
+                /Deducted[:\s]*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi
+            ];
+            
+            tdsPatterns.forEach(pattern => {
+                const matches = [...cleanText.matchAll(pattern)];
+                matches.forEach(match => {
+                    summary.taxes.push({
+                        type: 'TDS',
+                        amount: match[1],
+                        context: cleanText.substring(Math.max(0, match.index - 50), match.index + 100)
+                    });
+                });
             });
+            
+            // Parse interest income
+            const interestSection = cleanText.match(/(?:interest|bank|deposit|saving).*?(?=(?:salary|dividend|capital|business|profession|other|refund)|$)/gis);
+            if (interestSection) {
+                interestSection.forEach(section => {
+                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
+                    const bank = section.match(/(?:bank|institution)[:\s]*([A-Z][A-Z\s&.,]{5,50}?)(?:\s|Branch|Account)/i);
+                    
+                    summary.interestDetails.push({
+                        institution: bank ? bank[1].trim() : 'Not specified',
+                        section: section.substring(0, 300),
+                        amounts: amounts.map(m => m[1])
+                    });
+                });
+            }
+            
+            // Parse dividend information
+            const dividendSection = cleanText.match(/(?:dividend).*?(?=(?:salary|interest|capital|business|profession|other|refund)|$)/gis);
+            if (dividendSection) {
+                dividendSection.forEach(section => {
+                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
+                    summary.incomeDetails.push({
+                        type: 'Dividend',
+                        details: section.substring(0, 300),
+                        amounts: amounts.map(m => m[1])
+                    });
+                });
+            }
+            
+            // Parse capital gains
+            const capitalSection = cleanText.match(/(?:capital gain|mutual fund|share|equity).*?(?=(?:salary|interest|dividend|business|profession|other|refund)|$)/gis);
+            if (capitalSection) {
+                capitalSection.forEach(section => {
+                    const amounts = [...section.matchAll(/(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g)];
+                    summary.capitalGains.push({
+                        type: 'Capital Gains',
+                        details: section.substring(0, 300),
+                        amounts: amounts.map(m => m[1])
+                    });
+                });
+            }
+            
+            // Calculate summary totals
+            const allAmountNumbers = summary.rawAmounts.map(amt => parseFloat(amt.replace(/,/g, '')) || 0);
+            allAmountNumbers.sort((a, b) => b - a);
+            
+            if (allAmountNumbers.length > 0) {
+                summary.taxSummary.highestAmount = allAmountNumbers[0].toLocaleString('en-IN');
+                summary.taxSummary.totalAmountsFound = allAmountNumbers.length;
+                summary.taxSummary.sumOfAllAmounts = allAmountNumbers.reduce((a, b) => a + b, 0).toLocaleString('en-IN');
+            }
             
             return summary;
         }
@@ -545,25 +666,39 @@
         async function createExcelFile(data) {
             const workbook = XLSX.utils.book_new();
             
-            // Create summary sheet
+            // Create summary sheet with enhanced data
             const summaryData = [
                 ['AIS/TIS Summary Report'],
+                ['Generated on:', new Date().toLocaleString()],
                 [''],
-                ['Taxpayer Information'],
+                ['TAXPAYER INFORMATION'],
                 ['PAN', data.summary.taxpayerInfo.pan || 'Not found'],
                 ['Name', data.summary.taxpayerInfo.name || 'Not found'],
                 ['Financial Year', data.summary.taxpayerInfo.financialYear || 'Not found'],
                 [''],
-                ['Tax Summary'],
-                ['Total Income', data.summary.taxSummary.totalIncome || '0'],
-                ['Total Tax', data.summary.taxSummary.totalTax || '0'],
-                ['Total TDS', data.summary.taxSummary.totalTDS || '0'],
+                ['FINANCIAL SUMMARY'],
+                ['Total Amounts Found', data.summary.taxSummary.totalAmountsFound || 0],
+                ['Highest Amount', 'Rs. ' + (data.summary.taxSummary.highestAmount || '0')],
+                ['Sum of All Amounts', 'Rs. ' + (data.summary.taxSummary.sumOfAllAmounts || '0')],
                 [''],
-                ['Document Details'],
-                ['Total Pages', data.pages.length],
-                ['Extraction Date', new Date().toLocaleDateString()],
-                ['Extraction Time', new Date().toLocaleTimeString()]
+                ['ALL AMOUNTS EXTRACTED'],
+                ['S.No.', 'Amount (Rs.)']
             ];
+            
+            // Add all extracted amounts
+            if (data.summary.rawAmounts && data.summary.rawAmounts.length > 0) {
+                data.summary.rawAmounts.forEach((amount, index) => {
+                    summaryData.push([index + 1, amount]);
+                });
+            }
+            
+            summaryData.push(['']);
+            summaryData.push(['DOCUMENT PROCESSING INFO']);
+            summaryData.push(['Total Pages Processed', data.pages.length]);
+            summaryData.push(['Salary Records Found', data.summary.salaryDetails?.length || 0]);
+            summaryData.push(['Interest Records Found', data.summary.interestDetails?.length || 0]);
+            summaryData.push(['TDS Records Found', data.summary.taxes?.length || 0]);
+            summaryData.push(['Capital Gains Found', data.summary.capitalGains?.length || 0]);
             
             const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
             XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
